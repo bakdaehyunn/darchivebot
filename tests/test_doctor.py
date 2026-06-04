@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from darchivebot.doctor import run_doctor
@@ -36,7 +37,7 @@ def test_doctor_reports_online_telegram_and_registered_room(tmp_path: Path) -> N
     code, text = run_doctor(settings, ArchiveStore(settings.state_dir), online=True, telegram_api=FakeTelegramApi())
 
     assert code == 0
-    assert "[OK] darchive_chat_id is registered: -100123" in text
+    assert "[OK] darchive_chat_id is registered: ***0123" in text
     assert "[OK] Telegram getMe: @darchivebot" in text
     assert "[OK] Telegram registered chat command menu is synced" in text
 
@@ -50,3 +51,17 @@ def test_doctor_warns_when_commands_are_out_of_sync(tmp_path: Path) -> None:
     assert code == 0
     assert "Telegram default command menu is out of sync" in text
     assert "darchive telegram-commands sync" in text
+
+
+def test_doctor_warns_about_group_privacy_and_409_conflicts(tmp_path: Path) -> None:
+    settings = replace(make_settings(tmp_path), telegram_allowed_chat_ids=("-100123",), telegram_allow_all_chats=False)
+    settings.log_dir.mkdir(parents=True)
+    (settings.log_dir / "telegram.log").write_text("urllib.error.HTTPError: HTTP Error 409: Conflict\n", encoding="utf-8")
+
+    code, text = run_doctor(settings, ArchiveStore(settings.state_dir), online=False)
+
+    assert code == 0
+    assert "Group chat detected" in text
+    assert "Recent Telegram 409 polling conflict" in text
+    assert "Normal operation" in text
+    assert "when none exist, it exits without Codex work" in text

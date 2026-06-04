@@ -64,7 +64,12 @@ CREATE TABLE IF NOT EXISTS archive_items (
   capture_id TEXT NOT NULL UNIQUE REFERENCES captures(id) ON DELETE CASCADE,
   title TEXT NOT NULL,
   summary TEXT NOT NULL,
+  core_summary TEXT,
+  key_points_json TEXT,
+  context TEXT,
   extracted_text TEXT NOT NULL,
+  raw_extracted_text TEXT,
+  why_saved TEXT,
   source_language TEXT NOT NULL,
   tags_json TEXT NOT NULL,
   dates_mentioned_json TEXT NOT NULL,
@@ -121,6 +126,7 @@ class ArchiveStore:
     def init_db(self) -> None:
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            migrate_db(conn)
 
     def add_capture(
         self,
@@ -262,10 +268,41 @@ class ArchiveStore:
                 )
             )
 
+    def list_capture_summaries(self, limit: int) -> list[sqlite3.Row]:
+        self.init_db()
+        with self.connect() as conn:
+            return list(
+                conn.execute(
+                    """
+                    SELECT
+                      c.*,
+                      COUNT(cf.id) AS file_count,
+                      COALESCE(GROUP_CONCAT(DISTINCT cf.download_status), '') AS file_download_statuses,
+                      CASE WHEN ai.id IS NULL THEN 0 ELSE 1 END AS has_archive_item,
+                      COALESCE(ai.title, '') AS archive_title,
+                      COALESCE(ai.core_summary, ai.summary, '') AS archive_core_summary,
+                      COALESCE(ai.why_saved, '') AS archive_why_saved,
+                      COALESCE(ai.needs_review, 0) AS archive_needs_review
+                    FROM captures c
+                    LEFT JOIN capture_files cf ON cf.capture_id = c.id
+                    LEFT JOIN archive_items ai ON ai.capture_id = c.id
+                    GROUP BY c.id
+                    ORDER BY c.created_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+            )
+
     def get_capture(self, capture_id: str) -> sqlite3.Row | None:
         self.init_db()
         with self.connect() as conn:
             return conn.execute("SELECT * FROM captures WHERE id = ?", (capture_id,)).fetchone()
+
+    def get_archive_item(self, capture_id: str) -> sqlite3.Row | None:
+        self.init_db()
+        with self.connect() as conn:
+            return conn.execute("SELECT * FROM archive_items WHERE capture_id = ?", (capture_id,)).fetchone()
 
     def mark_capture_status(self, capture_id: str, status: str) -> None:
         self.init_db()
@@ -302,8 +339,13 @@ class ArchiveStore:
         self.init_db()
         now = utc_now()
         title = str(item.get("title") or "").strip() or "Untitled capture"
-        summary = str(item.get("summary") or "").strip()
-        extracted_text = str(item.get("extracted_text") or "").strip()
+        core_summary = str(item.get("core_summary") or item.get("summary") or "").strip()
+        summary = core_summary
+        key_points = list_value(item.get("key_points"))
+        context = str(item.get("context") or "").strip()
+        raw_extracted_text = str(item.get("raw_extracted_text") or item.get("extracted_text") or "").strip()
+        extracted_text = raw_extracted_text
+        why_saved = str(item.get("why_saved") or "").strip()
         source_language = str(item.get("source_language") or "unknown").strip() or "unknown"
         confidence = float(item.get("confidence") or 0.0)
         needs_review = 1 if bool(item.get("needs_review")) else 0
@@ -311,16 +353,22 @@ class ArchiveStore:
             conn.execute(
                 """
                 INSERT INTO archive_items(
-                  id, capture_id, title, summary, extracted_text, source_language,
+                  id, capture_id, title, summary, core_summary, key_points_json,
+                  context, extracted_text, raw_extracted_text, why_saved, source_language,
                   tags_json, dates_mentioned_json, people_mentioned_json,
                   action_candidates_json, confidence, needs_review, raw_codex_json,
                   created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(capture_id) DO UPDATE SET
                   title = excluded.title,
                   summary = excluded.summary,
+                  core_summary = excluded.core_summary,
+                  key_points_json = excluded.key_points_json,
+                  context = excluded.context,
                   extracted_text = excluded.extracted_text,
+                  raw_extracted_text = excluded.raw_extracted_text,
+                  why_saved = excluded.why_saved,
                   source_language = excluded.source_language,
                   tags_json = excluded.tags_json,
                   dates_mentioned_json = excluded.dates_mentioned_json,
@@ -336,7 +384,12 @@ class ArchiveStore:
                     capture_id,
                     title,
                     summary,
+                    core_summary,
+                    dumps(key_points),
+                    context,
                     extracted_text,
+                    raw_extracted_text,
+                    why_saved,
                     source_language,
                     dumps(list_value(item.get("tags"))),
                     dumps(list_value(item.get("dates_mentioned"))),
@@ -403,3 +456,17 @@ def list_value(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item) for item in value if str(item).strip()]
+
+
+def migrate_db(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(archive_items)")}
+    additions = {
+        "core_summary": "TEXT",
+        "key_points_json": "TEXT",
+        "context": "TEXT",
+        "raw_extracted_text": "TEXT",
+        "why_saved": "TEXT",
+    }
+    for column, column_type in additions.items():
+        if column not in columns:
+            conn.execute(f"ALTER TABLE archive_items ADD COLUMN {column} {column_type}")

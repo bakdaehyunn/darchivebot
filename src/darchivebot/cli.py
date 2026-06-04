@@ -132,6 +132,7 @@ def main(argv: list[str] | None = None) -> int:
             limit=args.limit,
             dry_run=args.dry_run,
             use_codex=False if args.no_codex else None,
+            progress=None if args.json or args.dry_run else print_process_progress,
         )
         print(format_results(results, json_output=args.json))
         return 0 if not any(item.get("status") == "failed" for item in results) else 1
@@ -215,7 +216,7 @@ def setup_cmd(
             telegram_bot_token=token,
             telegram_allowed_chat_ids=chat_id,
             telegram_admin_user_ids=admin_user_id,
-            allow_all_chats=allow_all_chats or settings.telegram_allow_all_chats,
+            allow_all_chats=allow_all_chats,
         )
 
     configured = get_settings()
@@ -231,6 +232,9 @@ def setup_cmd(
     if install_launchd:
         return install_launch_agent(settings.root, dry_run=dry_run)
     print("setup complete")
+    print("Normal operation: run `scripts/install_launch_agent.sh` so launchd keeps capture running and processes every 5 minutes.")
+    print("Test/debug mode: run `darchive telegram`, `darchive pending`, or `darchive process` directly when checking behavior.")
+    print("For personal archives, a 1:1 Telegram chat is recommended. For groups, disable BotFather Group Privacy.")
     return 0
 
 
@@ -251,7 +255,7 @@ def discover_chat_cmd(settings: Settings, plain: bool, json_output: bool) -> int
         print("no recent Telegram chats found")
         return 0
     for candidate in candidates:
-        print(f"{candidate.chat_id}\t{candidate.chat_type}\t{candidate.title}")
+        print(f"{mask_identifier(candidate.chat_id)}\t{candidate.chat_type}\t{candidate.title}")
     return 0
 
 
@@ -265,7 +269,7 @@ def telegram_commands_cmd(settings: Settings, action: str) -> int:
         print("[default]")
         print_commands(api.get_my_commands())
         if state.darchive_chat_id:
-            print(f"[registered chat {state.darchive_chat_id}]")
+            print(f"[registered chat {mask_identifier(state.darchive_chat_id)}]")
             print_commands(api.get_my_commands(scope=chat_command_scope(state.darchive_chat_id)))
         return 0
     if action == "sync":
@@ -313,15 +317,15 @@ def send_test_cmd(
         print("[FAIL] selected target is not configured")
         return 1
     if dry_run:
-        print(f"[dry-run] would send test message to {target}")
+        print(f"[dry-run] would send test message to {mask_identifier(target)}")
         return 0
     TelegramApiClient(settings.telegram_bot_token).send_message(target, "다카이브봇 테스트 메시지입니다.")
-    print(f"sent test message to {target}")
+    print(f"sent test message to {mask_identifier(target)}")
     return 0
 
 
 def list_cmd(store: ArchiveStore, limit: int, json_output: bool) -> int:
-    rows = store.list_captures(limit)
+    rows = store.list_capture_summaries(limit)
     if json_output:
         print(json.dumps([row_to_dict(row) for row in rows], ensure_ascii=False, indent=2))
         return 0
@@ -330,7 +334,15 @@ def list_cmd(store: ArchiveStore, limit: int, json_output: bool) -> int:
         return 0
     for row in rows:
         text = str(row["text"] or row["caption"] or "").replace("\n", " ")
-        print(f"{row['id']}\t{row['status']}\t{row['content_kind']}\t{text[:80]}")
+        file_status = format_file_status(row)
+        archive_status = "archived" if int(row["has_archive_item"] or 0) else "not_archived"
+        title = str(row["archive_title"] or "").replace("\n", " ").strip()
+        core_summary = str(row["archive_core_summary"] or "").replace("\n", " ").strip()
+        preview = title or core_summary or text[:80] or "(no text)"
+        print(
+            f"{row['id']}\t{row['status']}\t{row['content_kind']}\t"
+            f"files={file_status}\tarchive={archive_status}\t{preview[:100]}"
+        )
     return 0
 
 
@@ -340,8 +352,10 @@ def show_cmd(store: ArchiveStore, capture_id: str, json_output: bool) -> int:
         print(f"[FAIL] capture not found: {capture_id}")
         return 1
     files = store.files_for_capture(capture_id)
+    archive = store.get_archive_item(capture_id)
     data = row_to_dict(row)
     data["files"] = [row_to_dict(file_row) for file_row in files]
+    data["archive_item"] = archive_item_to_dict(archive) if archive is not None else None
     if json_output:
         print(json.dumps(data, ensure_ascii=False, indent=2))
         return 0
@@ -354,6 +368,21 @@ def show_cmd(store: ArchiveStore, capture_id: str, json_output: bool) -> int:
         print(f"caption: {data['caption']}")
     for file_row in data["files"]:
         print(f"file: {file_row.get('download_status')} {file_row.get('local_path')}")
+    if data["archive_item"]:
+        archive_item = data["archive_item"]
+        print(f"archive_title: {archive_item.get('title')}")
+        if archive_item.get("core_summary"):
+            print(f"core_summary: {archive_item.get('core_summary')}")
+        if archive_item.get("key_points"):
+            for point in archive_item["key_points"]:
+                print(f"key_point: {point}")
+        if archive_item.get("context"):
+            print(f"context: {archive_item.get('context')}")
+        if archive_item.get("why_saved"):
+            print(f"why_saved: {archive_item.get('why_saved')}")
+        if archive_item.get("tags"):
+            print(f"tags: {', '.join(archive_item['tags'])}")
+        print(f"needs_review: {archive_item.get('needs_review')}")
     return 0
 
 
@@ -365,6 +394,68 @@ def only_allowed_chat_id(settings: Settings) -> str:
 
 def row_to_dict(row: Any) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()}
+
+
+def archive_item_to_dict(row: Any) -> dict[str, Any]:
+    data = row_to_dict(row)
+    data["core_summary"] = data.get("core_summary") or data.get("summary") or ""
+    data["raw_extracted_text"] = data.get("raw_extracted_text") or data.get("extracted_text") or ""
+    data["key_points"] = load_json_list(data.get("key_points_json"))
+    data["tags"] = load_json_list(data.get("tags_json"))
+    data["dates_mentioned"] = load_json_list(data.get("dates_mentioned_json"))
+    data["people_mentioned"] = load_json_list(data.get("people_mentioned_json"))
+    data["action_candidates"] = load_json_list(data.get("action_candidates_json"))
+    data["needs_review"] = bool(data.get("needs_review"))
+    return data
+
+
+def load_json_list(value: Any) -> list[str]:
+    try:
+        payload = json.loads(str(value or "[]"))
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [str(item) for item in payload]
+
+
+def mask_identifier(value: str) -> str:
+    raw = str(value or "")
+    if len(raw) <= 4:
+        return "***"
+    return f"***{raw[-4:]}"
+
+
+def format_file_status(row: Any) -> str:
+    file_count = int(row["file_count"] or 0)
+    if file_count == 0:
+        return "none"
+    statuses = str(row["file_download_statuses"] or "").replace(",", "+") or "unknown"
+    return f"{file_count}:{statuses}"
+
+
+def print_process_progress(event: dict[str, Any]) -> None:
+    name = event.get("event")
+    capture_id = event.get("capture_id", "-")
+    processor = event.get("processor", "-")
+    kind = event.get("content_kind", "-")
+    if name == "start":
+        print(f"[process:start] capture={capture_id} kind={kind} processor={processor}")
+    elif name == "finish":
+        print(
+            f"[process:done] capture={capture_id} kind={kind} "
+            f"processor={processor} elapsed={event.get('elapsed_sec')}s"
+        )
+    elif name == "failed":
+        print(
+            f"[process:failed] capture={capture_id} kind={kind} processor={processor} "
+            f"elapsed={event.get('elapsed_sec')}s error={event.get('error')}"
+        )
+    elif name == "skipped":
+        print(
+            f"[process:skip] capture={capture_id} kind={kind} "
+            f"reason={event.get('reason', '-')}"
+        )
 
 
 def choose_setup_value(
@@ -402,7 +493,7 @@ def discover_chat_for_setup(token: str, *, dry_run: bool, non_interactive: bool)
     if not candidates:
         return ""
     latest = candidates[-1]
-    print(f"discovered chat id: {latest.chat_id} ({latest.title})")
+    print(f"discovered chat id: {mask_identifier(latest.chat_id)} ({latest.chat_type or 'unknown'})")
     return latest.chat_id
 
 

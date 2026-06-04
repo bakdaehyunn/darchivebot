@@ -186,6 +186,8 @@ class TelegramCaptureBot:
             return None
         if not self.is_allowed(chat_id):
             return None
+        if not is_capturable_message(message):
+            return None
         return self.capture_message(message)
 
     def capture_message(self, message: dict[str, Any]) -> str:
@@ -363,6 +365,38 @@ def extract_attachments(message: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in attachments if item["file_id"]]
 
 
+SERVICE_MESSAGE_KEYS = {
+    "new_chat_member",
+    "new_chat_members",
+    "new_chat_participant",
+    "left_chat_member",
+    "left_chat_participant",
+    "pinned_message",
+    "group_chat_created",
+    "supergroup_chat_created",
+    "channel_chat_created",
+    "message_auto_delete_timer_changed",
+    "migrate_to_chat_id",
+    "migrate_from_chat_id",
+    "forum_topic_created",
+    "forum_topic_edited",
+    "forum_topic_closed",
+    "forum_topic_reopened",
+    "video_chat_scheduled",
+    "video_chat_started",
+    "video_chat_ended",
+    "video_chat_participants_invited",
+}
+
+
+def is_capturable_message(message: dict[str, Any]) -> bool:
+    if any(key in message for key in SERVICE_MESSAGE_KEYS):
+        return False
+    text = str(message.get("text") or "").strip()
+    caption = str(message.get("caption") or "").strip()
+    return bool(text or caption or extract_attachments(message))
+
+
 def content_kind_for_message(text: str, caption: str, attachments: list[dict[str, Any]]) -> str:
     kinds = {item["kind"] for item in attachments}
     if "photo" in kinds:
@@ -444,10 +478,10 @@ def format_rooms_report(settings: Settings) -> tuple[int, str]:
     if state.darchive_chat_id:
         lines.extend(
             [
-                f"darchive_chat_id={state.darchive_chat_id}",
+                f"darchive_chat_id={mask_identifier(state.darchive_chat_id)}",
                 f"title={state.darchive_chat_title or '(empty)'}",
                 f"type={state.darchive_chat_type or '(empty)'}",
-                f"registered_by_user_id={state.registered_by_user_id or '(empty)'}",
+                f"registered_by_user_id={mask_identifier(state.registered_by_user_id) if state.registered_by_user_id else '(empty)'}",
                 f"registered_at={state.registered_at or '(empty)'}",
                 f"allowed={'yes' if state.darchive_chat_id in allowed_chat_ids(settings) else 'no'}",
             ]
@@ -455,12 +489,19 @@ def format_rooms_report(settings: Settings) -> tuple[int, str]:
     else:
         lines.append(f"[WARN] darchive_chat_id is not registered; send {REGISTER_CHAT_ROOM_COMMAND} in the Telegram chat")
     if settings.telegram_allowed_chat_ids:
-        lines.append(f"env_allowed_chat_ids={','.join(settings.telegram_allowed_chat_ids)}")
+        lines.append(f"env_allowed_chat_ids={','.join(mask_identifier(item) for item in settings.telegram_allowed_chat_ids)}")
     elif settings.telegram_allow_all_chats:
         lines.append("[WARN] DARCHIVE_ALLOW_ALL_CHATS=true; every chat can use the bot")
     else:
         lines.append("env_allowed_chat_ids=(empty)")
     return 0, "\n".join(lines)
+
+
+def mask_identifier(value: str) -> str:
+    raw = str(value or "")
+    if len(raw) <= 4:
+        return "***"
+    return f"***{raw[-4:]}"
 
 
 def discover_chat_candidates(payload: dict[str, Any]) -> list[TelegramChatCandidate]:

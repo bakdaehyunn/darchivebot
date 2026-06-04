@@ -40,7 +40,11 @@ def run_doctor(
         lines.append("[TODO] Add TELEGRAM_BOT_TOKEN to .env, then run: darchive doctor --online")
 
     if settings.telegram_allowed_chat_ids:
-        lines.append(f"[OK] TELEGRAM_ALLOWED_CHAT_IDS is set: {','.join(settings.telegram_allowed_chat_ids)}")
+        lines.append(f"[OK] TELEGRAM_ALLOWED_CHAT_IDS is set: {','.join(mask_identifier(item) for item in settings.telegram_allowed_chat_ids)}")
+        if any(chat_id.startswith("-") for chat_id in settings.telegram_allowed_chat_ids):
+            lines.append("[WARN] Group chat detected; if captures do not appear, disable BotFather Group Privacy or use a 1:1 chat")
+        else:
+            lines.append("[OK] 1:1 Telegram chat is recommended for personal archive captures")
     elif settings.telegram_allow_all_chats:
         lines.append("[WARN] DARCHIVE_ALLOW_ALL_CHATS=true; every chat can use the bot")
     else:
@@ -80,6 +84,12 @@ def run_doctor(
 
     lines.append(f"[OK] Codex processor enabled: {str(settings.codex_enabled).lower()}")
     lines.append(f"[OK] Codex sandbox: {settings.codex_sandbox}")
+    lines.append("[INFO] Normal operation: launchd/cron keeps capture running and runs `darchive process` every 5 minutes")
+    lines.append("[INFO] Processor checks SQLite for pending captures first; when none exist, it exits without Codex work")
+    lines.append("[INFO] Test/debug commands: run `darchive telegram`, `darchive pending`, or `darchive process` directly")
+
+    conflict_lines = describe_recent_polling_conflicts(settings)
+    lines.extend(conflict_lines)
 
     if online:
         telegram_failures, telegram_lines = describe_telegram_api_state(settings, telegram_api)
@@ -96,7 +106,7 @@ def describe_room_state(settings: Settings) -> tuple[int, list[str]]:
     if state.unreadable_error:
         return 1, [f"[FAIL] telegram room state is unreadable: {state.unreadable_error}"]
     if state.darchive_chat_id:
-        lines = [f"[OK] darchive_chat_id is registered: {state.darchive_chat_id}"]
+        lines = [f"[OK] darchive_chat_id is registered: {mask_identifier(state.darchive_chat_id)}"]
         if state.darchive_chat_id in settings.telegram_allowed_chat_ids:
             lines.append("[OK] darchive_chat_id is also listed in TELEGRAM_ALLOWED_CHAT_IDS")
         else:
@@ -162,3 +172,26 @@ def format_command_diff(actual: list[dict[str, str]], expected: list[dict[str, s
     expected_text = ", ".join(f"/{item['command']}" for item in expected)
     actual_text = ", ".join(f"/{item.get('command', '')}" for item in actual) or "(empty)"
     return f"expected={expected_text} actual={actual_text}"
+
+
+def mask_identifier(value: str) -> str:
+    raw = str(value or "")
+    if len(raw) <= 4:
+        return "***"
+    return f"***{raw[-4:]}"
+
+
+def describe_recent_polling_conflicts(settings: Settings) -> list[str]:
+    log_path = settings.log_dir / "telegram.log"
+    if not log_path.exists():
+        return []
+    try:
+        tail = "\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-200:])
+    except OSError:
+        return []
+    if "HTTP Error 409: Conflict" not in tail:
+        return []
+    return [
+        "[WARN] Recent Telegram 409 polling conflict found in telegram.log",
+        "[TODO] Make sure only one `darchive telegram` process uses this bot token, and do not share polling tokens across bots",
+    ]

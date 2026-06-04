@@ -54,7 +54,7 @@ def test_send_test_requires_exactly_one_target(capsys):
     assert "choose exactly one target" in capsys.readouterr().out
 
     assert cli.send_test_cmd(settings, chat_id=None, use_registered=False, use_allowed=True, dry_run=True) == 0
-    assert "would send test message to 123" in capsys.readouterr().out
+    assert "would send test message to ***" in capsys.readouterr().out
 
 
 def test_rooms_reports_registered_room(tmp_path, capsys, monkeypatch):
@@ -68,7 +68,7 @@ def test_rooms_reports_registered_room(tmp_path, capsys, monkeypatch):
 
     assert main(["rooms"]) == 0
     output = capsys.readouterr().out
-    assert "darchive_chat_id=-100123" in output
+    assert "darchive_chat_id=***0123" in output
     assert "allowed=yes" in output
 
 
@@ -95,6 +95,121 @@ def test_pending_shows_dry_run_processor_context(tmp_path, monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "dry-run processor=codex kind=text files=0" in output
     assert "관심 글" in output
+
+
+def test_list_shows_file_and_archive_status(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path)
+    store = ArchiveStore(settings.state_dir)
+    capture_id = store.add_capture(
+        capture_key="chat:2",
+        chat_id="chat",
+        message_id=2,
+        chat_type="private",
+        chat_title="me",
+        sender_user_id="42",
+        sender_name="User",
+        message_date=None,
+        text="관심 글",
+        caption="",
+        content_kind="text",
+        raw_message={"message_id": 2},
+    )
+    store.upsert_archive_item(
+        capture_id,
+        {
+            "title": "정리된 제목",
+            "core_summary": "스크린샷 안의 핵심 요약",
+            "key_points": ["핵심 1"],
+            "context": "screenshot",
+            "raw_extracted_text": "관심 글",
+            "why_saved": "참고할 만한 내용",
+            "source_language": "ko",
+            "tags": [],
+            "dates_mentioned": [],
+            "people_mentioned": [],
+            "action_candidates": [],
+            "confidence": 0.8,
+            "needs_review": False,
+        },
+    )
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["list"]) == 0
+    output = capsys.readouterr().out
+    assert "files=none" in output
+    assert "archive=archived" in output
+    assert "정리된 제목" in output
+
+
+def test_show_displays_structured_archive_item(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path)
+    store = ArchiveStore(settings.state_dir)
+    capture_id = store.add_capture(
+        capture_key="chat:22",
+        chat_id="chat",
+        message_id=22,
+        chat_type="private",
+        chat_title="me",
+        sender_user_id="42",
+        sender_name="User",
+        message_date=None,
+        text="",
+        caption="",
+        content_kind="photo",
+        raw_message={"message_id": 22},
+    )
+    store.upsert_archive_item(
+        capture_id,
+        {
+            "title": "스크린샷 제목",
+            "core_summary": "이미지 안의 실제 핵심",
+            "key_points": ["중요한 주장"],
+            "context": "social post screenshot",
+            "raw_extracted_text": "보이는 텍스트",
+            "why_saved": "나중에 참고할 아이디어",
+            "source_language": "ko",
+            "tags": ["idea"],
+            "dates_mentioned": [],
+            "people_mentioned": [],
+            "action_candidates": [],
+            "confidence": 0.8,
+            "needs_review": False,
+        },
+    )
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["show", capture_id]) == 0
+    output = capsys.readouterr().out
+    assert "archive_title: 스크린샷 제목" in output
+    assert "core_summary: 이미지 안의 실제 핵심" in output
+    assert "key_point: 중요한 주장" in output
+    assert "why_saved: 나중에 참고할 아이디어" in output
+
+
+def test_process_prints_progress(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path, codex_enabled=False)
+    store = ArchiveStore(settings.state_dir)
+    store.add_capture(
+        capture_key="chat:3",
+        chat_id="chat",
+        message_id=3,
+        chat_type="private",
+        chat_title="me",
+        sender_user_id="42",
+        sender_name="User",
+        message_date=None,
+        text="처리할 글",
+        caption="",
+        content_kind="text",
+        raw_message={"message_id": 3},
+    )
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["process", "--no-codex"]) == 0
+    output = capsys.readouterr().out
+    assert "[process:start]" in output
+    assert "[process:done]" in output
+    assert "elapsed=" in output
 
 
 def make_cli_settings(

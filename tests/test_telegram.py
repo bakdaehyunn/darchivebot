@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from darchivebot.storage import ArchiveStore
-from darchivebot.telegram import TelegramCaptureBot, extract_attachments, parse_command
+from darchivebot.telegram import TelegramCaptureBot, extract_attachments, is_capturable_message, parse_command
 
 from conftest import make_settings
 
@@ -65,3 +65,31 @@ def test_capture_photo_downloads_media_and_records_file(tmp_path):
     assert len(files) == 1
     assert files[0]["download_status"] == "downloaded"
     assert Path(files[0]["local_path"]).exists()
+
+
+def test_service_event_and_empty_messages_are_not_capturable():
+    assert not is_capturable_message({"message_id": 1, "new_chat_members": [{"id": 1}]})
+    assert not is_capturable_message({"message_id": 2})
+    assert is_capturable_message({"message_id": 3, "text": "hello"})
+
+
+def test_handle_update_ignores_service_event(tmp_path):
+    settings = make_settings(tmp_path)
+    store = ArchiveStore(settings.state_dir)
+    bot = TelegramCaptureBot(settings, store, api=FakeTelegramApi())  # type: ignore[arg-type]
+
+    capture_id = bot.handle_update(
+        {
+            "update_id": 1,
+            "message": {
+                "message_id": 9,
+                "date": 1_700_000_000,
+                "chat": {"id": 123, "type": "private", "first_name": "Me"},
+                "from": {"id": 42, "first_name": "Me"},
+                "new_chat_members": [{"id": 100, "is_bot": True}],
+            },
+        }
+    )
+
+    assert capture_id is None
+    assert store.list_captures(10) == []
