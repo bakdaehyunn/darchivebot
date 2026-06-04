@@ -1,0 +1,196 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from darchivebot.codex_harness import CodexHarness, CodexRunError, validate_codex_item
+from darchivebot.config import Settings
+from darchivebot.ocr import OcrAdapter, TesseractOcrAdapter
+from darchivebot.state import file_lock
+from darchivebot.storage import ArchiveStore
+
+
+class CaptureProcessor:
+    def __init__(
+        self,
+        settings: Settings,
+        store: ArchiveStore,
+        codex: CodexHarness | None = None,
+        ocr: OcrAdapter | None = None,
+    ) -> None:
+        self.settings = settings
+        self.store = store
+        self.codex = codex or CodexHarness(settings)
+        self.ocr = ocr or TesseractOcrAdapter(settings.tesseract_bin)
+
+    def process_pending(
+        self,
+        *,
+        limit: int | None = None,
+        dry_run: bool = False,
+        use_codex: bool | None = None,
+    ) -> list[dict[str, Any]]:
+        actual_limit = limit or self.settings.processor_batch_size
+        lock_path = self.settings.state_dir / "locks" / "processor.lock"
+        with file_lock(lock_path) as acquired:
+            if not acquired:
+                return [{"status": "skipped", "reason": "processor lock is already held"}]
+            return self._process_pending_unlocked(limit=actual_limit, dry_run=dry_run, use_codex=use_codex)
+
+    def _process_pending_unlocked(
+        self,
+        *,
+        limit: int,
+        dry_run: bool,
+        use_codex: bool | None,
+    ) -> list[dict[str, Any]]:
+        captures = self.store.pending_captures(limit)
+        results: list[dict[str, Any]] = []
+        codex_enabled = self.settings.codex_enabled if use_codex is None else use_codex
+        for capture in captures:
+            capture_id = str(capture["id"])
+            files = self.store.files_for_capture(capture_id)
+            packet = build_capture_packet(capture, files)
+            image_paths = image_paths_for_files(files)
+            if dry_run:
+                results.append(
+                    {
+                        "capture_id": capture_id,
+                        "status": "dry-run",
+                        "processor": "codex" if codex_enabled else "basic",
+                        "content_kind": packet["content_kind"],
+                        "file_count": len(files),
+                        "image_paths": [str(path) for path in image_paths],
+                        "text_preview": preview_text(packet),
+                        "packet": packet,
+                    }
+                )
+                continue
+            run_id = self.store.start_processing_run(
+                capture_id=capture_id,
+                processor="codex" if codex_enabled else "basic",
+            )
+            try:
+                if codex_enabled:
+                    item = self.codex.process_capture(packet, image_paths)
+                    item = validate_codex_item(item, capture_id)
+                else:
+                    item = self.basic_extract(packet, files)
+                self.write_item(capture_id, item, source="codex" if codex_enabled else "basic")
+                self.store.mark_capture_status(capture_id, "processed")
+                self.store.finish_processing_run(run_id=run_id, status="processed")
+                results.append({"capture_id": capture_id, "status": "processed"})
+            except (CodexRunError, ValueError, OSError, RuntimeError) as exc:
+                self.store.mark_capture_status(capture_id, "failed_retryable")
+                self.store.finish_processing_run(run_id=run_id, status="failed", error=str(exc)[:4000])
+                results.append({"capture_id": capture_id, "status": "failed", "error": str(exc)})
+        return results
+
+    def basic_extract(self, packet: dict[str, Any], files: list[Any]) -> dict[str, Any]:
+        text_parts = [
+            str(packet.get("text") or "").strip(),
+            str(packet.get("caption") or "").strip(),
+        ]
+        for row in files:
+            local_path = str(row["local_path"] or "")
+            if local_path and is_image_path(Path(local_path)):
+                extracted = self.ocr.extract_text(Path(local_path)).strip()
+                if extracted:
+                    text_parts.append(extracted)
+        extracted_text = "\n\n".join(part for part in text_parts if part)
+        title = first_title(extracted_text) or f"Capture {packet.get('message_id')}"
+        return {
+            "capture_id": str(packet["capture_id"]),
+            "content_type": str(packet.get("content_kind") or "unknown"),
+            "title": title,
+            "summary": extracted_text[:300],
+            "extracted_text": extracted_text,
+            "source_language": "unknown",
+            "tags": [],
+            "dates_mentioned": [],
+            "people_mentioned": [],
+            "action_candidates": [],
+            "confidence": 0.25 if extracted_text else 0.0,
+            "needs_review": True,
+        }
+
+    def write_item(self, capture_id: str, item: dict[str, Any], source: str) -> None:
+        text = str(item.get("extracted_text") or "")
+        if text:
+            self.store.upsert_extracted_text(capture_id=capture_id, source=source, text=text, metadata=item)
+        self.store.upsert_archive_item(capture_id, item)
+
+
+def build_capture_packet(capture: Any, files: list[Any]) -> dict[str, Any]:
+    return {
+        "capture_id": str(capture["id"]),
+        "capture_key": str(capture["capture_key"]),
+        "chat_id": str(capture["chat_id"]),
+        "message_id": int(capture["message_id"]),
+        "message_datetime": str(capture["message_datetime"] or ""),
+        "content_kind": str(capture["content_kind"] or ""),
+        "text": str(capture["text"] or ""),
+        "caption": str(capture["caption"] or ""),
+        "files": [
+            {
+                "id": str(row["id"]),
+                "file_kind": str(row["file_kind"] or ""),
+                "mime_type": str(row["mime_type"] or ""),
+                "file_name": str(row["file_name"] or ""),
+                "local_path": str(row["local_path"] or ""),
+                "download_status": str(row["download_status"] or ""),
+            }
+            for row in files
+        ],
+    }
+
+
+def image_paths_for_files(files: list[Any]) -> list[Path]:
+    paths: list[Path] = []
+    for row in files:
+        local_path = str(row["local_path"] or "")
+        if local_path and is_image_path(Path(local_path)) and Path(local_path).exists():
+            paths.append(Path(local_path))
+    return paths
+
+
+def is_image_path(path: Path) -> bool:
+    return path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".tif", ".tiff", ".bmp"}
+
+
+def first_title(text: str) -> str:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:80]
+    return ""
+
+
+def preview_text(packet: dict[str, Any]) -> str:
+    text = str(packet.get("text") or packet.get("caption") or "").replace("\n", " ").strip()
+    return text[:120]
+
+
+def format_results(results: list[dict[str, Any]], json_output: bool) -> str:
+    if json_output:
+        return json.dumps(results, ensure_ascii=False, indent=2)
+    lines = []
+    for item in results:
+        line = f"{item.get('capture_id', '-')}: {item.get('status', '-')}"
+        if item.get("processor"):
+            line += f" processor={item['processor']}"
+        if item.get("content_kind"):
+            line += f" kind={item['content_kind']}"
+        if item.get("file_count") is not None:
+            line += f" files={item['file_count']}"
+        if item.get("image_paths"):
+            line += f" images={len(item['image_paths'])}"
+        if item.get("reason"):
+            line += f" ({item['reason']})"
+        if item.get("error"):
+            line += f" - {item['error']}"
+        if item.get("text_preview"):
+            line += f" :: {item['text_preview']}"
+        lines.append(line)
+    return "\n".join(lines) if lines else "nothing to process"
