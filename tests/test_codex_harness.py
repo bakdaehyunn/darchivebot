@@ -15,12 +15,20 @@ def test_ensure_capture_schema_writes_required_schema(tmp_path):
     assert "key_points" in payload["required"]
     assert "raw_extracted_text" in payload["required"]
     assert "why_saved" in payload["required"]
+    assert "primary_interest" in payload["required"]
+    assert "secondary_interests" in payload["required"]
+    assert "topic" in payload["required"]
+    assert "revisit_priority" in payload["required"]
+    assert "insight_seed" in payload["required"]
     assert payload["additionalProperties"] is False
 
 
 def test_prompt_requires_screenshot_core_extraction_without_sqlite_writes():
     assert "screenshots/photos as the primary input" in PROMPT
     assert "actual core meaning inside the image" in PROMPT
+    assert "starter interest taxonomy" in PROMPT
+    assert "primary_interest" in PROMPT
+    assert "insight_seed" in PROMPT
     assert "Do not modify files or write to SQLite" in PROMPT
     assert "Python will validate your JSON and write SQLite" in PROMPT
 
@@ -39,6 +47,14 @@ def test_validate_codex_item_rejects_mismatched_capture_id():
                 "source_language": "unknown",
                 "content_type": "text",
                 "tags": [],
+                "primary_interest": "other/unknown",
+                "secondary_interests": [],
+                "topic": "",
+                "subtopic": "",
+                "classification_reason": "",
+                "revisit_priority": "medium",
+                "revisit_reason": "",
+                "insight_seed": "",
                 "dates_mentioned": [],
                 "people_mentioned": [],
                 "action_candidates": [],
@@ -59,6 +75,14 @@ def test_validate_codex_item_normalizes_new_fields_with_old_fallbacks():
             "source_language": "ko",
             "content_type": "photo",
             "tags": [" capture "],
+            "primary_interest": "AI",
+            "secondary_interests": [" career ", ""],
+            "topic": "agents",
+            "subtopic": "workflow",
+            "classification_reason": "agent workflow capture",
+            "revisit_priority": "urgent",
+            "revisit_reason": "compare later",
+            "insight_seed": "connects AI and work systems",
             "dates_mentioned": [],
             "people_mentioned": [],
             "action_candidates": [],
@@ -73,4 +97,9 @@ def test_validate_codex_item_normalizes_new_fields_with_old_fallbacks():
     assert item["summary"] == "old summary"
     assert item["extracted_text"] == "old text"
     assert item["key_points"] == []
+    assert item["primary_interest"] == "AI"
+    assert item["secondary_interests"] == ["career"]
+    assert item["topic"] == "agents"
+    assert item["revisit_priority"] == "medium"
+    assert item["insight_seed"] == "connects AI and work systems"
     assert item["confidence"] == 1.0

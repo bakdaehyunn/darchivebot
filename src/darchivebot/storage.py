@@ -72,6 +72,14 @@ CREATE TABLE IF NOT EXISTS archive_items (
   why_saved TEXT,
   source_language TEXT NOT NULL,
   tags_json TEXT NOT NULL,
+  primary_interest TEXT,
+  secondary_interests_json TEXT,
+  topic TEXT,
+  subtopic TEXT,
+  classification_reason TEXT,
+  revisit_priority TEXT,
+  revisit_reason TEXT,
+  insight_seed TEXT,
   dates_mentioned_json TEXT NOT NULL,
   people_mentioned_json TEXT NOT NULL,
   action_candidates_json TEXT NOT NULL,
@@ -268,12 +276,25 @@ class ArchiveStore:
                 )
             )
 
-    def list_capture_summaries(self, limit: int) -> list[sqlite3.Row]:
+    def list_capture_summaries(self, limit: int, interest: str = "") -> list[sqlite3.Row]:
         self.init_db()
+        interest = interest.strip().lower()
+        where_clause = ""
+        params: list[Any] = []
+        if interest:
+            where_clause = """
+                    WHERE ai.id IS NOT NULL
+                      AND (
+                        LOWER(COALESCE(ai.primary_interest, '')) = ?
+                        OR LOWER(COALESCE(ai.secondary_interests_json, '')) LIKE ?
+                      )
+                    """
+            params.extend([interest, f"%{interest}%"])
+        params.append(limit)
         with self.connect() as conn:
             return list(
                 conn.execute(
-                    """
+                    f"""
                     SELECT
                       c.*,
                       COUNT(cf.id) AS file_count,
@@ -282,15 +303,20 @@ class ArchiveStore:
                       COALESCE(ai.title, '') AS archive_title,
                       COALESCE(ai.core_summary, ai.summary, '') AS archive_core_summary,
                       COALESCE(ai.why_saved, '') AS archive_why_saved,
+                      COALESCE(ai.primary_interest, '') AS archive_primary_interest,
+                      COALESCE(ai.secondary_interests_json, '[]') AS archive_secondary_interests_json,
+                      COALESCE(ai.topic, '') AS archive_topic,
+                      COALESCE(ai.subtopic, '') AS archive_subtopic,
                       COALESCE(ai.needs_review, 0) AS archive_needs_review
                     FROM captures c
                     LEFT JOIN capture_files cf ON cf.capture_id = c.id
                     LEFT JOIN archive_items ai ON ai.capture_id = c.id
+                    {where_clause}
                     GROUP BY c.id
                     ORDER BY c.created_at DESC
                     LIMIT ?
                     """,
-                    (limit,),
+                    tuple(params),
                 )
             )
 
@@ -347,6 +373,14 @@ class ArchiveStore:
         extracted_text = raw_extracted_text
         why_saved = str(item.get("why_saved") or "").strip()
         source_language = str(item.get("source_language") or "unknown").strip() or "unknown"
+        primary_interest = str(item.get("primary_interest") or "other/unknown").strip() or "other/unknown"
+        secondary_interests = list_value(item.get("secondary_interests"))
+        topic = str(item.get("topic") or "").strip()
+        subtopic = str(item.get("subtopic") or "").strip()
+        classification_reason = str(item.get("classification_reason") or "").strip()
+        revisit_priority = str(item.get("revisit_priority") or "medium").strip().lower() or "medium"
+        revisit_reason = str(item.get("revisit_reason") or "").strip()
+        insight_seed = str(item.get("insight_seed") or "").strip()
         confidence = float(item.get("confidence") or 0.0)
         needs_review = 1 if bool(item.get("needs_review")) else 0
         with self.connect() as conn:
@@ -355,11 +389,13 @@ class ArchiveStore:
                 INSERT INTO archive_items(
                   id, capture_id, title, summary, core_summary, key_points_json,
                   context, extracted_text, raw_extracted_text, why_saved, source_language,
-                  tags_json, dates_mentioned_json, people_mentioned_json,
+                  tags_json, primary_interest, secondary_interests_json, topic, subtopic,
+                  classification_reason, revisit_priority, revisit_reason, insight_seed,
+                  dates_mentioned_json, people_mentioned_json,
                   action_candidates_json, confidence, needs_review, raw_codex_json,
                   created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(capture_id) DO UPDATE SET
                   title = excluded.title,
                   summary = excluded.summary,
@@ -371,6 +407,14 @@ class ArchiveStore:
                   why_saved = excluded.why_saved,
                   source_language = excluded.source_language,
                   tags_json = excluded.tags_json,
+                  primary_interest = excluded.primary_interest,
+                  secondary_interests_json = excluded.secondary_interests_json,
+                  topic = excluded.topic,
+                  subtopic = excluded.subtopic,
+                  classification_reason = excluded.classification_reason,
+                  revisit_priority = excluded.revisit_priority,
+                  revisit_reason = excluded.revisit_reason,
+                  insight_seed = excluded.insight_seed,
                   dates_mentioned_json = excluded.dates_mentioned_json,
                   people_mentioned_json = excluded.people_mentioned_json,
                   action_candidates_json = excluded.action_candidates_json,
@@ -392,6 +436,14 @@ class ArchiveStore:
                     why_saved,
                     source_language,
                     dumps(list_value(item.get("tags"))),
+                    primary_interest,
+                    dumps(secondary_interests),
+                    topic,
+                    subtopic,
+                    classification_reason,
+                    revisit_priority,
+                    revisit_reason,
+                    insight_seed,
                     dumps(list_value(item.get("dates_mentioned"))),
                     dumps(list_value(item.get("people_mentioned"))),
                     dumps(list_value(item.get("action_candidates"))),
@@ -466,7 +518,19 @@ def migrate_db(conn: sqlite3.Connection) -> None:
         "context": "TEXT",
         "raw_extracted_text": "TEXT",
         "why_saved": "TEXT",
+        "primary_interest": "TEXT",
+        "secondary_interests_json": "TEXT",
+        "topic": "TEXT",
+        "subtopic": "TEXT",
+        "classification_reason": "TEXT",
+        "revisit_priority": "TEXT",
+        "revisit_reason": "TEXT",
+        "insight_seed": "TEXT",
     }
     for column, column_type in additions.items():
         if column not in columns:
-            conn.execute(f"ALTER TABLE archive_items ADD COLUMN {column} {column_type}")
+            try:
+                conn.execute(f"ALTER TABLE archive_items ADD COLUMN {column} {column_type}")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise

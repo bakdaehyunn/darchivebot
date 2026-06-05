@@ -28,6 +28,14 @@ class FakeCodex:
             "why_saved": "나중에 다시 볼 만한 참고 내용",
             "source_language": "ko",
             "tags": ["archive", "screenshot"],
+            "primary_interest": "AI",
+            "secondary_interests": ["career"],
+            "topic": "agent archive",
+            "subtopic": "personal knowledge workflow",
+            "classification_reason": "AI workflow capture about archiving",
+            "revisit_priority": "high",
+            "revisit_reason": "can shape the archive product direction",
+            "insight_seed": "connects AI agents with personal archives",
             "dates_mentioned": [],
             "people_mentioned": [],
             "action_candidates": [],
@@ -84,6 +92,9 @@ def test_processor_uses_codex_and_writes_archive_item(tmp_path):
     assert archive["core_summary"] == "이미지 안의 핵심 내용"
     assert archive["summary"] == "이미지 안의 핵심 내용"
     assert archive["raw_extracted_text"] == "관심 글 본문"
+    assert archive["primary_interest"] == "AI"
+    assert archive["topic"] == "agent archive"
+    assert archive["revisit_priority"] == "high"
 
 
 def test_processor_basic_fallback_when_codex_disabled(tmp_path):
@@ -101,6 +112,7 @@ def test_processor_basic_fallback_when_codex_disabled(tmp_path):
     assert archive["extracted_text"] == "관심 글 본문"
     assert archive["raw_extracted_text"] == "관심 글 본문"
     assert archive["core_summary"] == "관심 글 본문"
+    assert archive["primary_interest"] == "other/unknown"
     assert archive["needs_review"] == 1
 
 
@@ -146,6 +158,8 @@ def test_processor_sends_photo_image_to_codex_and_stores_structured_fields(tmp_p
     assert archive["context"] == "screenshot"
     assert "첫 번째 핵심" in archive["key_points_json"]
     assert archive["why_saved"] == "나중에 다시 볼 만한 참고 내용"
+    assert archive["classification_reason"] == "AI workflow capture about archiving"
+    assert archive["insight_seed"] == "connects AI agents with personal archives"
 
 
 def test_processor_with_no_pending_exits_without_codex(tmp_path):

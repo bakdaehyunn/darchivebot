@@ -10,6 +10,21 @@ from darchivebot.config import Settings
 from darchivebot.json_utils import dumps, loads_object
 
 
+INTEREST_TAXONOMY = [
+    "AI",
+    "technology",
+    "career",
+    "business",
+    "sports",
+    "health",
+    "money/investing",
+    "writing/content",
+    "lifestyle",
+    "personal ideas",
+    "other/unknown",
+]
+
+
 CAPTURE_EXTRACT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -23,6 +38,14 @@ CAPTURE_EXTRACT_SCHEMA: dict[str, Any] = {
         "why_saved": {"type": "string"},
         "source_language": {"type": "string"},
         "tags": {"type": "array", "items": {"type": "string"}},
+        "primary_interest": {"type": "string"},
+        "secondary_interests": {"type": "array", "items": {"type": "string"}},
+        "topic": {"type": "string"},
+        "subtopic": {"type": "string"},
+        "classification_reason": {"type": "string"},
+        "revisit_priority": {"type": "string"},
+        "revisit_reason": {"type": "string"},
+        "insight_seed": {"type": "string"},
         "dates_mentioned": {"type": "array", "items": {"type": "string"}},
         "people_mentioned": {"type": "array", "items": {"type": "string"}},
         "action_candidates": {"type": "array", "items": {"type": "string"}},
@@ -40,6 +63,14 @@ CAPTURE_EXTRACT_SCHEMA: dict[str, Any] = {
         "why_saved",
         "source_language",
         "tags",
+        "primary_interest",
+        "secondary_interests",
+        "topic",
+        "subtopic",
+        "classification_reason",
+        "revisit_priority",
+        "revisit_reason",
+        "insight_seed",
         "dates_mentioned",
         "people_mentioned",
         "action_candidates",
@@ -65,6 +96,12 @@ Rules:
 - Put important visible text in raw_extracted_text when readable.
 - Put the semantic takeaway in core_summary and concrete claims/facts in key_points.
 - Explain why this may be useful to keep in why_saved.
+- Classify the capture by the actual subject matter using this starter interest taxonomy: AI, technology, career, business, sports, health, money/investing, writing/content, lifestyle, personal ideas, other/unknown.
+- Use primary_interest for the best single fit and secondary_interests for other relevant interests; the taxonomy is a guide, not a permanent limit.
+- Use topic and subtopic to make the item easier to find later.
+- Use classification_reason to explain the classification briefly.
+- Use revisit_priority as one of: low, medium, high.
+- Use insight_seed for a small future-facing observation about how this item might connect to later captures; do not synthesize across multiple captures.
 - Summarize conservatively; do not invent unreadable details.
 - Use Korean when the source is Korean; otherwise use the source language.
 - Mark needs_review=true when image text is unclear, the content is ambiguous, or extraction is incomplete.
@@ -146,9 +183,32 @@ def validate_codex_item(item: dict[str, Any], capture_id: str) -> dict[str, Any]
     ).strip()
     normalized["summary"] = normalized["core_summary"]
     normalized["extracted_text"] = normalized["raw_extracted_text"]
-    for key in ("title", "context", "why_saved", "source_language", "content_type"):
+    for key in (
+        "title",
+        "context",
+        "why_saved",
+        "source_language",
+        "content_type",
+        "primary_interest",
+        "topic",
+        "subtopic",
+        "classification_reason",
+        "revisit_reason",
+        "insight_seed",
+    ):
         normalized[key] = str(normalized.get(key) or "").strip()
-    for key in ("key_points", "tags", "dates_mentioned", "people_mentioned", "action_candidates"):
+    if not normalized["primary_interest"]:
+        normalized["primary_interest"] = "other/unknown"
+    revisit_priority = str(normalized.get("revisit_priority") or "").strip().lower()
+    normalized["revisit_priority"] = revisit_priority if revisit_priority in {"low", "medium", "high"} else "medium"
+    for key in (
+        "key_points",
+        "tags",
+        "secondary_interests",
+        "dates_mentioned",
+        "people_mentioned",
+        "action_candidates",
+    ):
         value = normalized.get(key)
         if not isinstance(value, list):
             normalized[key] = []

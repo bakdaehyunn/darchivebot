@@ -76,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_list = sub.add_parser("list", help="List recent captures")
     p_list.add_argument("--limit", type=int, default=20)
+    p_list.add_argument("--interest", help="Only show archived captures matching an interest")
     p_list.add_argument("--json", action="store_true")
 
     p_show = sub.add_parser("show", help="Show one capture")
@@ -146,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
         print(format_results(results, json_output=args.json))
         return 0
     if args.cmd == "list":
-        return list_cmd(store, limit=args.limit, json_output=args.json)
+        return list_cmd(store, limit=args.limit, interest=args.interest or "", json_output=args.json)
     if args.cmd == "show":
         return show_cmd(store, capture_id=args.capture_id, json_output=args.json)
     return 2
@@ -324,13 +325,13 @@ def send_test_cmd(
     return 0
 
 
-def list_cmd(store: ArchiveStore, limit: int, json_output: bool) -> int:
-    rows = store.list_capture_summaries(limit)
+def list_cmd(store: ArchiveStore, limit: int, interest: str, json_output: bool) -> int:
+    rows = store.list_capture_summaries(limit, interest=interest)
     if json_output:
         print(json.dumps([row_to_dict(row) for row in rows], ensure_ascii=False, indent=2))
         return 0
     if not rows:
-        print("no captures")
+        print("no captures" if not interest else f"no captures for interest: {interest}")
         return 0
     for row in rows:
         text = str(row["text"] or row["caption"] or "").replace("\n", " ")
@@ -338,10 +339,13 @@ def list_cmd(store: ArchiveStore, limit: int, json_output: bool) -> int:
         archive_status = "archived" if int(row["has_archive_item"] or 0) else "not_archived"
         title = str(row["archive_title"] or "").replace("\n", " ").strip()
         core_summary = str(row["archive_core_summary"] or "").replace("\n", " ").strip()
+        primary_interest = str(row["archive_primary_interest"] or "").replace("\n", " ").strip()
+        topic = str(row["archive_topic"] or "").replace("\n", " ").strip()
+        classification = format_classification_preview(primary_interest, topic)
         preview = title or core_summary or text[:80] or "(no text)"
         print(
             f"{row['id']}\t{row['status']}\t{row['content_kind']}\t"
-            f"files={file_status}\tarchive={archive_status}\t{preview[:100]}"
+            f"files={file_status}\tarchive={archive_status}{classification}\t{preview[:100]}"
         )
     return 0
 
@@ -382,6 +386,22 @@ def show_cmd(store: ArchiveStore, capture_id: str, json_output: bool) -> int:
             print(f"why_saved: {archive_item.get('why_saved')}")
         if archive_item.get("tags"):
             print(f"tags: {', '.join(archive_item['tags'])}")
+        if archive_item.get("primary_interest"):
+            print(f"primary_interest: {archive_item.get('primary_interest')}")
+        if archive_item.get("secondary_interests"):
+            print(f"secondary_interests: {', '.join(archive_item['secondary_interests'])}")
+        if archive_item.get("topic"):
+            print(f"topic: {archive_item.get('topic')}")
+        if archive_item.get("subtopic"):
+            print(f"subtopic: {archive_item.get('subtopic')}")
+        if archive_item.get("classification_reason"):
+            print(f"classification_reason: {archive_item.get('classification_reason')}")
+        if archive_item.get("revisit_priority"):
+            print(f"revisit_priority: {archive_item.get('revisit_priority')}")
+        if archive_item.get("revisit_reason"):
+            print(f"revisit_reason: {archive_item.get('revisit_reason')}")
+        if archive_item.get("insight_seed"):
+            print(f"insight_seed: {archive_item.get('insight_seed')}")
         print(f"needs_review: {archive_item.get('needs_review')}")
     return 0
 
@@ -402,6 +422,14 @@ def archive_item_to_dict(row: Any) -> dict[str, Any]:
     data["raw_extracted_text"] = data.get("raw_extracted_text") or data.get("extracted_text") or ""
     data["key_points"] = load_json_list(data.get("key_points_json"))
     data["tags"] = load_json_list(data.get("tags_json"))
+    data["primary_interest"] = data.get("primary_interest") or ""
+    data["secondary_interests"] = load_json_list(data.get("secondary_interests_json"))
+    data["topic"] = data.get("topic") or ""
+    data["subtopic"] = data.get("subtopic") or ""
+    data["classification_reason"] = data.get("classification_reason") or ""
+    data["revisit_priority"] = data.get("revisit_priority") or ""
+    data["revisit_reason"] = data.get("revisit_reason") or ""
+    data["insight_seed"] = data.get("insight_seed") or ""
     data["dates_mentioned"] = load_json_list(data.get("dates_mentioned_json"))
     data["people_mentioned"] = load_json_list(data.get("people_mentioned_json"))
     data["action_candidates"] = load_json_list(data.get("action_candidates_json"))
@@ -432,6 +460,15 @@ def format_file_status(row: Any) -> str:
         return "none"
     statuses = str(row["file_download_statuses"] or "").replace(",", "+") or "unknown"
     return f"{file_count}:{statuses}"
+
+
+def format_classification_preview(primary_interest: str, topic: str) -> str:
+    parts = []
+    if primary_interest:
+        parts.append(f"interest={primary_interest}")
+    if topic:
+        parts.append(f"topic={topic}")
+    return "\t" + " ".join(parts) if parts else ""
 
 
 def print_process_progress(event: dict[str, Any]) -> None:

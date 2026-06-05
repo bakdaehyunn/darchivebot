@@ -1,8 +1,28 @@
 # 다카이브봇
 
-다카이브봇은 관심 있는 글, 메모, 캡처, 사진, 문서를 Telegram 채팅방에 올리면 로컬에 저장하고, 이후 scheduled processor가 Codex를 중간 처리자로 사용해 SQLite에 정리하는 개인 아카이브 봇입니다.
+다카이브봇은 나중에 다시 보고 싶은 글, 캡처, 사진, 메모를 Telegram으로 보내 두면 관심사별로 모아 정리해 주는 개인 아카이브 봇입니다.
 
-MVP 목표는 활용 기능을 넓히는 것이 아니라 안정적인 수집과 정리 파이프라인을 만드는 것입니다. 일정, 일지, 태그 기반 요약, Telegram 정리 출력은 후속 단계로 둡니다.
+핵심은 "저장"보다 "다시 쓸 수 있게 정리"하는 것입니다. 특히 스크린샷 안에 들어 있는 글의 핵심 내용, 중요한 포인트, 어떤 관심사에 가까운지, 왜 저장해 둘 만한지까지 구조화해서 로컬에 남기는 것을 목표로 합니다.
+
+## 아카이브가 쌓이는 과정
+
+1. Telegram에서 다카이브봇과 1:1 채팅을 엽니다.
+2. 나중에 다시 보고 싶은 캡처나 사진을 보냅니다.
+3. 다카이브봇이 원본 메시지와 파일을 로컬에 저장합니다.
+4. 예약된 processor가 새 항목만 골라 핵심 내용과 관심사 분류를 정리합니다.
+5. 필요할 때 로컬에서 목록과 상세 내용을 확인합니다.
+
+## 로컬 아카이브에 정리되는 내용
+
+다카이브봇은 Telegram으로 보낸 캡처와 메시지를 로컬 폴더와 SQLite DB에 저장하고, 나중에 찾아보기 쉬운 형태로 정리합니다.
+
+- 원본 메시지와 첨부 파일은 로컬에 보관합니다.
+- 제목과 핵심 요약으로 목록에서 빠르게 알아볼 수 있게 합니다.
+- AI, 커리어, 테크놀로지, 스포츠 같은 관심사와 세부 주제로 분류합니다.
+- 주요 포인트와 원문 텍스트를 함께 남겨 다시 읽기 쉽게 합니다.
+- 저장 이유, 다시 볼 우선순위, 태그를 붙여 나중에 검색하거나 분류할 수 있게 합니다.
+- 나중에 다른 캡처와 연결될 수 있는 작은 insight seed를 남깁니다.
+- 처리할 새 항목이 없으면 scheduled processor는 조용히 종료합니다.
 
 ## 빠른 시작
 
@@ -15,7 +35,7 @@ darchive init
 darchive doctor
 ```
 
-개인 아카이브 용도는 Telegram 그룹보다 봇과의 1:1 채팅을 권장합니다. 그룹을 쓰면 BotFather의 Group Privacy 때문에 일반 메시지나 사진이 캡처되지 않을 수 있습니다.
+개인 아카이브 용도는 Telegram 그룹보다 봇과의 1:1 채팅을 권장합니다. 설정이 단순하고, 다른 대화와 섞이지 않아 캡처함으로 쓰기 좋습니다.
 
 `.env`에 Telegram token과 허용 채팅방을 넣습니다. token, chat id, admin user id는 출력하거나 커밋하지 않습니다.
 
@@ -58,7 +78,7 @@ darchive pending
 darchive process
 ```
 
-## 명령어
+## 주요 명령어
 
 ```bash
 darchive init
@@ -78,26 +98,30 @@ darchive show <capture-id>
 darchive send-test --chat-id <telegram-chat-id>
 ```
 
-- `telegram`: Telegram polling으로 텍스트, 캡션, 사진, 문서를 캡처하고 media 파일을 `.local/captures/`에 저장합니다.
-- `pending`: processor가 처리할 pending capture와 Codex/image 입력 계획을 미리 봅니다.
-- `process`: pending capture가 있을 때만 Codex CLI non-interactive mode로 보내 구조화된 archive metadata를 받고 SQLite에 저장합니다. pending이 없으면 Codex를 호출하지 않고 종료합니다.
-- `process --no-codex`: Codex 없이 텍스트/캡션과 optional OCR fallback만 사용합니다. 로컬 점검과 테스트용입니다.
-- `list`: capture 상태, 파일 다운로드 상태, archive metadata 존재 여부와 제목/요약 preview를 함께 보여줍니다.
-- `show`: capture와 파일, 처리된 archive metadata를 함께 보여줍니다.
+- `telegram`: Telegram에서 보낸 글, 캡처, 사진, 문서를 로컬에 저장합니다.
+- `pending`: 아직 정리되지 않은 항목과 처리 계획을 미리 봅니다.
+- `process`: 새 항목이 있을 때만 내용을 정리하고 로컬 DB에 저장합니다.
+- `process --no-codex`: Codex 없이 기본 추출만 실행합니다. 로컬 점검과 테스트용입니다.
+- `list`: 최근 캡처와 정리 상태를 한 줄씩 확인합니다.
+- `list --interest <interest>`: 특정 관심사로 정리된 항목만 확인합니다.
+- `show`: 캡처 원본, 파일 경로, 정리된 제목/요약/포인트를 자세히 확인합니다.
 
-## Codex processor
+## 정리되는 내용
 
-`darchive process`는 기본적으로 `codex exec`를 사용합니다.
+다카이브봇은 단순히 "이미지를 저장했다"에서 끝나지 않고, 나중에 검색하고 다시 읽기 좋은 형태로 정리합니다.
 
-- Codex는 capture packet과 이미지 파일을 읽습니다.
-- 캡처/사진은 primary input입니다. Codex prompt는 "캡처 이미지"라는 라벨이 아니라 이미지 안의 실제 핵심 내용과 의미를 추출하도록 요구합니다.
-- Codex 결과는 JSON Schema로 제한됩니다.
-- Python 코드가 결과를 검증한 뒤 SQLite에 씁니다.
-- SQLite에는 `title`, `core_summary`, `key_points`, `context`, `raw_extracted_text`, `why_saved`, `tags`, `content_type`, `source_language`, `confidence`, `needs_review`가 저장됩니다.
-- 기존 archive row 호환성을 위해 old `summary`/`extracted_text` 컬럼도 fallback 값으로 유지됩니다.
-- Codex 실행이 실패하면 capture는 `failed_retryable` 상태로 남아 재시도할 수 있습니다.
+- 제목: 나중에 목록에서 알아보기 쉬운 짧은 이름
+- 핵심 요약: 캡처나 글이 말하는 실제 내용
+- 주요 포인트: 중요한 주장, 사실, 관찰, 아이디어
+- 관심사와 주제: AI, 커리어, 스포츠처럼 나중에 묶어 볼 기준
+- 원문 텍스트: 이미지나 메시지에서 읽힌 텍스트
+- 다시 볼 이유와 우선순위: 왜 나중에 다시 볼 만한지
+- insight seed: 나중에 비슷한 항목들과 연결될 수 있는 작은 단서
+- 태그와 언어 정보: 검색과 분류를 위한 보조 정보
 
-주요 설정:
+기술적으로는 Codex가 캡처와 이미지를 읽어 구조화된 JSON을 만들고, Python 코드가 검증한 뒤 SQLite에 저장합니다. Codex가 DB를 직접 수정하지는 않습니다.
+
+## 주요 설정
 
 ```env
 DARCHIVE_CODEX_ENABLED=true
@@ -107,6 +131,12 @@ DARCHIVE_CODEX_SANDBOX=read-only
 DARCHIVE_CODEX_EPHEMERAL=true
 DARCHIVE_CODEX_TIMEOUT_SEC=900
 ```
+
+## 앞으로 더해질 수 있는 것
+
+다카이브봇은 먼저 캡처와 글을 안정적으로 모으고 관심사별로 정리하는 개인 아카이브로 시작합니다. 이후에는 저장된 항목 사이의 관련성, 반복되는 관심사, 주간/월간 인사이트, Telegram으로 다시 꺼내보기 같은 기능을 붙일 수 있습니다.
+
+Insight synthesis 방향은 [docs/insight-synthesis.md](docs/insight-synthesis.md)에 따로 정리합니다.
 
 ## macOS launchd
 

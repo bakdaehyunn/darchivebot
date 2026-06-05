@@ -125,6 +125,14 @@ def test_list_shows_file_and_archive_status(tmp_path, monkeypatch, capsys):
             "why_saved": "참고할 만한 내용",
             "source_language": "ko",
             "tags": [],
+            "primary_interest": "AI",
+            "secondary_interests": ["career"],
+            "topic": "agents",
+            "subtopic": "personal archive",
+            "classification_reason": "AI archive workflow",
+            "revisit_priority": "high",
+            "revisit_reason": "제품 방향에 참고",
+            "insight_seed": "AI와 개인 아카이브 연결",
             "dates_mentioned": [],
             "people_mentioned": [],
             "action_candidates": [],
@@ -138,7 +146,47 @@ def test_list_shows_file_and_archive_status(tmp_path, monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "files=none" in output
     assert "archive=archived" in output
+    assert "interest=AI topic=agents" in output
     assert "정리된 제목" in output
+
+
+def test_list_filters_by_interest(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path)
+    store = ArchiveStore(settings.state_dir)
+    capture_id = store.add_capture(
+        capture_key="chat:21",
+        chat_id="chat",
+        message_id=21,
+        chat_type="private",
+        chat_title="me",
+        sender_user_id="42",
+        sender_name="User",
+        message_date=None,
+        text="커리어 글",
+        caption="",
+        content_kind="text",
+        raw_message={"message_id": 21},
+    )
+    store.upsert_archive_item(
+        capture_id,
+        {
+            "title": "커리어 글",
+            "core_summary": "커리어 요약",
+            "raw_extracted_text": "커리어 글",
+            "source_language": "ko",
+            "primary_interest": "career",
+            "secondary_interests": ["AI"],
+            "topic": "portfolio",
+            "confidence": 0.8,
+            "needs_review": False,
+        },
+    )
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["list", "--interest", "AI"]) == 0
+    output = capsys.readouterr().out
+    assert capture_id in output
+    assert "interest=career topic=portfolio" in output
 
 
 def test_show_displays_structured_archive_item(tmp_path, monkeypatch, capsys):
@@ -169,6 +217,14 @@ def test_show_displays_structured_archive_item(tmp_path, monkeypatch, capsys):
             "why_saved": "나중에 참고할 아이디어",
             "source_language": "ko",
             "tags": ["idea"],
+            "primary_interest": "AI",
+            "secondary_interests": ["career", "technology"],
+            "topic": "agents",
+            "subtopic": "archive workflow",
+            "classification_reason": "agent-based archive idea",
+            "revisit_priority": "high",
+            "revisit_reason": "다카이브봇 제품 방향과 연결됨",
+            "insight_seed": "captures can become agent-readable knowledge",
             "dates_mentioned": [],
             "people_mentioned": [],
             "action_candidates": [],
@@ -184,6 +240,12 @@ def test_show_displays_structured_archive_item(tmp_path, monkeypatch, capsys):
     assert "core_summary: 이미지 안의 실제 핵심" in output
     assert "key_point: 중요한 주장" in output
     assert "why_saved: 나중에 참고할 아이디어" in output
+    assert "primary_interest: AI" in output
+    assert "secondary_interests: career, technology" in output
+    assert "topic: agents" in output
+    assert "classification_reason: agent-based archive idea" in output
+    assert "revisit_priority: high" in output
+    assert "insight_seed: captures can become agent-readable knowledge" in output
 
 
 def test_process_prints_progress(tmp_path, monkeypatch, capsys):

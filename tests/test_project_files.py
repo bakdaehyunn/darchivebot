@@ -27,3 +27,11 @@ def test_preflight_script_checks_private_runtime_files_and_secrets():
     assert "git ls-files --error-unmatch .env" in preflight
     assert "*.sqlite3" in preflight
     assert "TELEGRAM_BOT_TOKEN" in preflight
+
+
+def test_readme_frames_product_as_interest_aware_archive_without_mvp_language():
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "관심사별로 모아 정리" in text
+    assert "AI, 커리어, 테크놀로지, 스포츠 같은 관심사" in text
+    assert "insight seed" in text
+    assert "MVP" not in text
