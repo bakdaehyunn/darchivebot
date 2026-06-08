@@ -330,6 +330,29 @@ class ArchiveStore:
         with self.connect() as conn:
             return conn.execute("SELECT * FROM archive_items WHERE capture_id = ?", (capture_id,)).fetchone()
 
+    def list_archive_items_for_graph(self, limit: int | None = None) -> list[sqlite3.Row]:
+        self.init_db()
+        sql = """
+            SELECT
+              ai.*,
+              c.id AS capture_row_id,
+              c.capture_key,
+              c.message_id,
+              c.message_datetime,
+              c.content_kind,
+              c.text AS capture_text,
+              c.caption AS capture_caption
+            FROM archive_items ai
+            JOIN captures c ON c.id = ai.capture_id
+            ORDER BY ai.updated_at DESC
+        """
+        params: tuple[Any, ...] = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (limit,)
+        with self.connect() as conn:
+            return list(conn.execute(sql, params))
+
     def mark_capture_status(self, capture_id: str, status: str) -> None:
         self.init_db()
         with self.connect() as conn:

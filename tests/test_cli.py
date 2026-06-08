@@ -274,6 +274,49 @@ def test_process_prints_progress(tmp_path, monkeypatch, capsys):
     assert "elapsed=" in output
 
 
+def test_graph_export_writes_jsonld_under_local_graph(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path)
+    store = ArchiveStore(settings.state_dir)
+    capture_id = store.add_capture(
+        capture_key="chat:31",
+        chat_id="chat",
+        message_id=31,
+        chat_type="private",
+        chat_title="me",
+        sender_user_id="42",
+        sender_name="User",
+        message_date=None,
+        text="그래프 글",
+        caption="",
+        content_kind="text",
+        raw_message={"message_id": 31},
+    )
+    store.upsert_archive_item(
+        capture_id,
+        {
+            "title": "그래프 글",
+            "core_summary": "그래프 요약",
+            "raw_extracted_text": "그래프 글",
+            "source_language": "ko",
+            "primary_interest": "AI",
+            "secondary_interests": ["technology"],
+            "topic": "ontology graph",
+            "tags": ["graph"],
+            "confidence": 0.8,
+            "needs_review": False,
+        },
+    )
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["graph", "export"]) == 0
+
+    output = capsys.readouterr().out
+    graph_path = tmp_path / ".local" / "graph" / "darchivebot.jsonld"
+    assert "exported 1 archive items" in output
+    assert graph_path.exists()
+    assert "darch:ArchiveItem" in graph_path.read_text(encoding="utf-8")
+
+
 def make_cli_settings(
     tmp_path,
     *,

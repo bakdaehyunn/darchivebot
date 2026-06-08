@@ -116,6 +116,7 @@ darchive telegram-commands sync
 darchive telegram
 darchive pending
 darchive process
+darchive graph export
 darchive process --no-codex
 darchive list
 darchive show <capture-id>
@@ -125,6 +126,7 @@ darchive send-test --chat-id <telegram-chat-id>
 - `telegram`: Telegram에서 보낸 글, 캡처, 사진, 문서를 로컬에 저장합니다.
 - `pending`: 아직 정리되지 않은 항목과 처리 계획을 미리 봅니다.
 - `process`: 새 항목이 있을 때만 내용을 정리하고 로컬 DB에 저장합니다.
+- `graph export`: 정리된 아카이브 항목을 `.local/graph/darchivebot.jsonld`에 JSON-LD 그래프로 내보냅니다.
 - `process --no-codex`: Codex 없이 기본 추출만 실행합니다. 로컬 점검과 테스트용입니다.
 - `list`: 최근 캡처와 정리 상태를 한 줄씩 확인합니다.
 - `list --interest <interest>`: 특정 관심사로 정리된 항목만 확인합니다.
@@ -161,6 +163,7 @@ DARCHIVE_CODEX_TIMEOUT_SEC=900
 다카이브봇은 먼저 캡처와 글을 안정적으로 모으고 관심사별로 정리하는 개인 아카이브로 시작합니다. 이후에는 저장된 항목 사이의 관련성, 반복되는 관심사, 주간/월간 인사이트, Telegram으로 다시 꺼내보기 같은 기능을 붙일 수 있습니다.
 
 Insight synthesis 방향은 [docs/insight-synthesis.md](docs/insight-synthesis.md)에 따로 정리합니다.
+Ontology-native graph 전환 방향은 [docs/ontology-graph.md](docs/ontology-graph.md)에 따로 정리합니다.
 
 ## macOS launchd
 

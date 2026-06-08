@@ -9,6 +9,7 @@ from typing import Any
 
 from darchivebot.config import DEFAULT_ENV_FILE, ROOT, Settings, ensure_local_dirs, get_settings, load_env
 from darchivebot.doctor import run_doctor
+from darchivebot.graph import default_graph_path, export_graph
 from darchivebot.processor import CaptureProcessor, format_results
 from darchivebot.storage import ArchiveStore
 from darchivebot.telegram import (
@@ -83,6 +84,13 @@ def main(argv: list[str] | None = None) -> int:
     p_show.add_argument("capture_id")
     p_show.add_argument("--json", action="store_true")
 
+    p_graph = sub.add_parser("graph", help="Export ontology-oriented local graph data")
+    graph_sub = p_graph.add_subparsers(dest="graph_cmd", required=True)
+    p_graph_export = graph_sub.add_parser("export", help="Export archive items as JSON-LD")
+    p_graph_export.add_argument("--output", type=Path)
+    p_graph_export.add_argument("--limit", type=int)
+    p_graph_export.add_argument("--json", action="store_true")
+
     args = parser.parse_args(argv)
     load_env()
     settings = get_settings()
@@ -150,6 +158,15 @@ def main(argv: list[str] | None = None) -> int:
         return list_cmd(store, limit=args.limit, interest=args.interest or "", json_output=args.json)
     if args.cmd == "show":
         return show_cmd(store, capture_id=args.capture_id, json_output=args.json)
+    if args.cmd == "graph":
+        return graph_cmd(
+            settings,
+            store,
+            action=args.graph_cmd,
+            output_path=args.output,
+            limit=args.limit,
+            json_output=args.json,
+        )
     return 2
 
 
@@ -403,6 +420,26 @@ def show_cmd(store: ArchiveStore, capture_id: str, json_output: bool) -> int:
         if archive_item.get("insight_seed"):
             print(f"insight_seed: {archive_item.get('insight_seed')}")
         print(f"needs_review: {archive_item.get('needs_review')}")
+    return 0
+
+
+def graph_cmd(
+    settings: Settings,
+    store: ArchiveStore,
+    *,
+    action: str,
+    output_path: Path | None,
+    limit: int | None,
+    json_output: bool,
+) -> int:
+    if action != "export":
+        return 2
+    path = output_path or default_graph_path(settings.root)
+    result = export_graph(store, path, limit=limit)
+    if json_output:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(f"exported {result['archive_items']} archive items to {result['path']}")
     return 0
 
 

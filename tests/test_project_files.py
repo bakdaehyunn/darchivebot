@@ -31,7 +31,17 @@ def test_preflight_script_checks_private_runtime_files_and_secrets():
 
 def test_readme_frames_product_as_interest_aware_archive_without_mvp_language():
     text = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "관심사별로 모아 정리" in text
+    assert "아이디어 주머니" in text
     assert "AI, 커리어, 테크놀로지, 스포츠 같은 관심사" in text
     assert "insight seed" in text
+    assert "docs/ontology-graph.md" in text
     assert "MVP" not in text
+
+
+def test_ontology_graph_docs_define_local_jsonld_transition():
+    text = (ROOT / "docs" / "ontology-graph.md").read_text(encoding="utf-8")
+    assert ".local/graph/darchivebot.jsonld" in text
+    assert "darch:Capture" in text
+    assert "darch:ArchiveItem" in text
+    assert "darch:hasInterest" in text
+    assert "SQLite remains the source of truth" in text
