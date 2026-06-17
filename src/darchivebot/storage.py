@@ -102,9 +102,42 @@ CREATE TABLE IF NOT EXISTS processing_runs (
   finished_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS insight_notes (
+  id TEXT PRIMARY KEY,
+  period_type TEXT NOT NULL,
+  period_start TEXT NOT NULL,
+  period_end TEXT NOT NULL,
+  title TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  recurring_themes_json TEXT NOT NULL,
+  related_capture_groups_json TEXT NOT NULL,
+  notable_archive_item_ids_json TEXT NOT NULL,
+  questions_json TEXT NOT NULL,
+  suggested_reviews_json TEXT NOT NULL,
+  review_status TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  needs_review INTEGER NOT NULL,
+  generator TEXT NOT NULL,
+  raw_codex_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS insight_note_items (
+  id TEXT PRIMARY KEY,
+  insight_note_id TEXT NOT NULL REFERENCES insight_notes(id) ON DELETE CASCADE,
+  archive_item_id TEXT NOT NULL REFERENCES archive_items(id) ON DELETE CASCADE,
+  evidence_role TEXT NOT NULL,
+  evidence_order INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(insight_note_id, archive_item_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_captures_status_created ON captures(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_capture_files_capture_id ON capture_files(capture_id);
 CREATE INDEX IF NOT EXISTS idx_processing_runs_capture_id ON processing_runs(capture_id);
+CREATE INDEX IF NOT EXISTS idx_insight_notes_period ON insight_notes(period_type, period_start, period_end);
+CREATE INDEX IF NOT EXISTS idx_insight_note_items_archive_item_id ON insight_note_items(archive_item_id);
 """
 
 
@@ -339,6 +372,7 @@ class ArchiveStore:
               c.capture_key,
               c.message_id,
               c.message_datetime,
+              c.status AS capture_status,
               c.content_kind,
               c.text AS capture_text,
               c.caption AS capture_caption
@@ -352,6 +386,124 @@ class ArchiveStore:
             params = (limit,)
         with self.connect() as conn:
             return list(conn.execute(sql, params))
+
+    def processing_runs_for_capture_ids(self, capture_ids: list[str]) -> dict[str, list[sqlite3.Row]]:
+        self.init_db()
+        if not capture_ids:
+            return {}
+        placeholders = ",".join("?" for _ in capture_ids)
+        with self.connect() as conn:
+            rows = list(
+                conn.execute(
+                    f"""
+                    SELECT * FROM processing_runs
+                    WHERE capture_id IN ({placeholders})
+                    ORDER BY started_at DESC
+                    """,
+                    tuple(capture_ids),
+                )
+            )
+        grouped: dict[str, list[sqlite3.Row]] = {capture_id: [] for capture_id in capture_ids}
+        for row in rows:
+            grouped.setdefault(str(row["capture_id"]), []).append(row)
+        return grouped
+
+    def create_insight_note(self, note: dict[str, Any]) -> str:
+        self.init_db()
+        note_id = str(note.get("id") or uuid.uuid4())
+        now = utc_now()
+        evidence_ids = list_value(note.get("notable_archive_item_ids"))
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO insight_notes(
+                  id, period_type, period_start, period_end, title, summary,
+                  recurring_themes_json, related_capture_groups_json,
+                  notable_archive_item_ids_json, questions_json, suggested_reviews_json,
+                  review_status, confidence, needs_review, generator, raw_codex_json,
+                  created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    note_id,
+                    str(note.get("period_type") or "weekly"),
+                    str(note.get("period_start") or ""),
+                    str(note.get("period_end") or ""),
+                    str(note.get("title") or "Untitled insight note"),
+                    str(note.get("summary") or ""),
+                    dumps(json_array(note.get("recurring_themes"))),
+                    dumps(json_array(note.get("related_capture_groups"))),
+                    dumps(evidence_ids),
+                    dumps(json_array(note.get("questions"))),
+                    dumps(json_array(note.get("suggested_reviews"))),
+                    str(note.get("review_status") or "draft"),
+                    float(note.get("confidence") or 0.0),
+                    1 if bool(note.get("needs_review")) else 0,
+                    str(note.get("generator") or "local"),
+                    dumps(note.get("raw_codex_json") or note),
+                    now,
+                    now,
+                ),
+            )
+            for index, archive_item_id in enumerate(evidence_ids, start=1):
+                conn.execute(
+                    """
+                    INSERT INTO insight_note_items(
+                      id, insight_note_id, archive_item_id, evidence_role, evidence_order, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (str(uuid.uuid4()), note_id, archive_item_id, "evidence", index, now),
+                )
+        return note_id
+
+    def list_insight_notes(self, limit: int = 20) -> list[sqlite3.Row]:
+        self.init_db()
+        with self.connect() as conn:
+            return list(
+                conn.execute(
+                    """
+                    SELECT n.*, COUNT(i.id) AS evidence_count
+                    FROM insight_notes n
+                    LEFT JOIN insight_note_items i ON i.insight_note_id = n.id
+                    GROUP BY n.id
+                    ORDER BY n.created_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+            )
+
+    def get_insight_note(self, note_id: str) -> sqlite3.Row | None:
+        self.init_db()
+        with self.connect() as conn:
+            return conn.execute("SELECT * FROM insight_notes WHERE id = ?", (note_id,)).fetchone()
+
+    def insight_note_items(self, note_id: str) -> list[sqlite3.Row]:
+        self.init_db()
+        with self.connect() as conn:
+            return list(
+                conn.execute(
+                    """
+                    SELECT
+                      ini.*,
+                      ai.capture_id,
+                      ai.title,
+                      COALESCE(ai.core_summary, ai.summary, '') AS core_summary,
+                      COALESCE(ai.primary_interest, '') AS primary_interest,
+                      COALESCE(ai.topic, '') AS topic,
+                      c.content_kind,
+                      c.status AS capture_status
+                    FROM insight_note_items ini
+                    JOIN archive_items ai ON ai.id = ini.archive_item_id
+                    JOIN captures c ON c.id = ai.capture_id
+                    WHERE ini.insight_note_id = ?
+                    ORDER BY ini.evidence_order ASC
+                    """,
+                    (note_id,),
+                )
+            )
 
     def mark_capture_status(self, capture_id: str, status: str) -> None:
         self.init_db()
@@ -531,6 +683,10 @@ def list_value(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item) for item in value if str(item).strip()]
+
+
+def json_array(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
 
 
 def migrate_db(conn: sqlite3.Connection) -> None:

@@ -44,6 +44,7 @@ cat > "$PROCESS_PLIST" <<PLIST
   <array>
     <string>$ROOT/.venv/bin/darchive</string>
     <string>process</string>
+    <string>--export-graph</string>
   </array>
   <key>WorkingDirectory</key>
   <string>$ROOT</string>

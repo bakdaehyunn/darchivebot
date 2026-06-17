@@ -46,6 +46,8 @@ CAPTURE_EXTRACT_SCHEMA: dict[str, Any] = {
         "revisit_priority": {"type": "string"},
         "revisit_reason": {"type": "string"},
         "insight_seed": {"type": "string"},
+        "questions": {"type": "array", "items": {"type": "string"}},
+        "relation_candidates": {"type": "array", "items": {"type": "string"}},
         "dates_mentioned": {"type": "array", "items": {"type": "string"}},
         "people_mentioned": {"type": "array", "items": {"type": "string"}},
         "action_candidates": {"type": "array", "items": {"type": "string"}},
@@ -71,6 +73,8 @@ CAPTURE_EXTRACT_SCHEMA: dict[str, Any] = {
         "revisit_priority",
         "revisit_reason",
         "insight_seed",
+        "questions",
+        "relation_candidates",
         "dates_mentioned",
         "people_mentioned",
         "action_candidates",
@@ -102,6 +106,8 @@ Rules:
 - Use classification_reason to explain the classification briefly.
 - Use revisit_priority as one of: low, medium, high.
 - Use insight_seed for a small future-facing observation about how this item might connect to later captures; do not synthesize across multiple captures.
+- Use questions for explicit unresolved questions inside the capture or natural follow-up questions it raises.
+- Use relation_candidates for short hints about what this capture may later connect to, without claiming a verified relation.
 - Summarize conservatively; do not invent unreadable details.
 - Use Korean when the source is Korean; otherwise use the source language.
 - Mark needs_review=true when image text is unclear, the content is ambiguous, or extraction is incomplete.
@@ -205,6 +211,8 @@ def validate_codex_item(item: dict[str, Any], capture_id: str) -> dict[str, Any]
         "key_points",
         "tags",
         "secondary_interests",
+        "questions",
+        "relation_candidates",
         "dates_mentioned",
         "people_mentioned",
         "action_candidates",

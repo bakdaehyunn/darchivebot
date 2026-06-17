@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from darchivebot.json_utils import dumps
 from darchivebot.storage import ArchiveStore
 
+
+ONTOLOGY_VERSION = "2026-06-08"
+GRAPH_EXPORT_VERSION = 1
 
 GRAPH_CONTEXT: dict[str, Any] = {
     "darch": "https://darchivebot.local/ontology#",
@@ -32,29 +36,49 @@ def default_graph_path(root: Path) -> Path:
     return root / ".local" / "graph" / "darchivebot.jsonld"
 
 
-def export_graph(store: ArchiveStore, output_path: Path, *, limit: int | None = None) -> dict[str, Any]:
+def export_graph(
+    store: ArchiveStore,
+    output_path: Path,
+    *,
+    limit: int | None = None,
+    include_raw_text: bool = False,
+) -> dict[str, Any]:
     rows = store.list_archive_items_for_graph(limit=limit)
-    payload = build_graph_document(rows)
+    payload = build_graph_document(rows, include_raw_text=include_raw_text)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(dumps(payload) + "\n", encoding="utf-8")
-    return {"path": str(output_path), "archive_items": len(rows), "nodes": len(payload["@graph"])}
+    metadata = dict(payload["metadata"])
+    metadata["path"] = str(output_path)
+    return metadata
 
 
-def build_graph_document(rows: list[Any]) -> dict[str, Any]:
+def build_graph_document(rows: list[Any], *, include_raw_text: bool = False) -> dict[str, Any]:
     graph: list[dict[str, Any]] = []
     seen_node_ids: set[str] = set()
     for row in rows:
-        for node in graph_nodes_for_archive_row(row):
+        for node in graph_nodes_for_archive_row(row, include_raw_text=include_raw_text):
             node_id = str(node.get("@id") or "")
             if node_id and node_id in seen_node_ids:
                 continue
             if node_id:
                 seen_node_ids.add(node_id)
             graph.append(node)
-    return {"@context": GRAPH_CONTEXT, "@graph": graph}
+    metadata = {
+        "@type": "darch:GraphExport",
+        "ontology_version": ONTOLOGY_VERSION,
+        "export_version": GRAPH_EXPORT_VERSION,
+        "export_scope": "lightweight_jsonld",
+        "source": "sqlite_archive_rows",
+        "semantic_store_equivalent": False,
+        "generated_at": utc_now(),
+        "archive_items": len(rows),
+        "nodes": len(graph),
+        "raw_text_included": include_raw_text,
+    }
+    return {"@context": GRAPH_CONTEXT, "metadata": metadata, "@graph": graph}
 
 
-def graph_nodes_for_archive_row(row: Any) -> list[dict[str, Any]]:
+def graph_nodes_for_archive_row(row: Any, *, include_raw_text: bool = False) -> list[dict[str, Any]]:
     archive_id = str(row["id"])
     capture_id = str(row["capture_id"])
     archive_node_id = urn("archive-item", archive_id)
@@ -72,7 +96,6 @@ def graph_nodes_for_archive_row(row: Any) -> list[dict[str, Any]]:
             "@type": "darch:ArchiveItem",
             "title": str(row["title"] or ""),
             "summary": str(row["core_summary"] or row["summary"] or ""),
-            "darch:rawExtractedText": str(row["raw_extracted_text"] or row["extracted_text"] or ""),
             "darch:whySaved": str(row["why_saved"] or ""),
             "darch:classificationReason": str(row["classification_reason"] or ""),
             "darch:revisitPriority": str(row["revisit_priority"] or ""),
@@ -91,6 +114,10 @@ def graph_nodes_for_archive_row(row: Any) -> list[dict[str, Any]]:
             "updatedAt": str(row["updated_at"] or ""),
         }
     )
+    if include_raw_text:
+        raw_text = str(row["raw_extracted_text"] or row["extracted_text"] or "")
+        if raw_text:
+            archive_node["darch:rawExtractedText"] = raw_text
     capture_node = compact_dict(
         {
             "@id": capture_node_id,
@@ -175,3 +202,7 @@ def slugify(value: str) -> str:
     slug = re.sub(r"[^0-9A-Za-z가-힣._/-]+", "-", value.strip().lower())
     slug = slug.strip("-")
     return slug or "unknown"
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")

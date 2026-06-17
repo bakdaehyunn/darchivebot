@@ -1,12 +1,12 @@
 # Insight synthesis design
 
-This document defines the next product layer for 다카이브봇. It is a design only; it does not authorize migrations or implementation by itself.
+This document defines one implementation track inside 다카이브봇's Viewpoint Layer. It is a design only; it does not authorize migrations or implementation by itself.
 
 ## Product purpose
 
 The archive layer answers: "What did I save, and what is it about?"
 
-The insight synthesis layer should answer:
+The Viewpoint Layer should eventually answer:
 
 - What am I repeatedly saving?
 - Which captures are related?
@@ -14,7 +14,22 @@ The insight synthesis layer should answer:
 - Which saved ideas are worth revisiting now?
 - Is there a project, decision, question, or habit forming across multiple captures?
 
-The layer must not collapse all captures into one generic summary. Each archive item remains individually useful. Synthesis sits above those items and connects them.
+The layer must not collapse all captures into one generic summary. Each archive item remains individually useful. Insight synthesis sits inside the Viewpoint Layer and connects those items when there is enough evidence.
+
+Layer position:
+
+```text
+Capture Layer
+  -> Archive Layer
+  -> Semantic Graph Layer
+  -> Viewpoint Layer
+       -> related captures
+       -> recurring themes
+       -> periodic insight notes
+       -> Codex discussion context
+```
+
+The Viewpoint Layer is broader than insight notes. It is the layer that turns saved material into personal viewpoint context for future Codex discussion.
 
 ## Current foundation
 
@@ -245,6 +260,7 @@ Expected use:
 ```bash
 darchive insights
 darchive insights generate --period weekly
+darchive insights generate --period weekly --dry-run
 darchive insights generate --period monthly
 darchive insights show <insight-id>
 darchive insights show <insight-id> --json
@@ -266,9 +282,20 @@ darchive themes show <theme-id>
 
 Do not add Telegram output until local CLI review is useful.
 
+## First local implementation
+
+The first implementation is intentionally local and inspect-first:
+
+- `darchive insights` lists locally stored draft notes.
+- `darchive insights generate --period weekly --dry-run` previews the note without writing SQLite rows.
+- `darchive insights generate --period weekly` writes a draft `insight_notes` row and evidence rows in `insight_note_items`.
+- `darchive insights show <insight-id>` shows the note and the archive items used as evidence.
+
+This first implementation uses validated SQLite archive rows and local graph/readiness signals. It does not call Telegram, does not send summaries, and does not include raw extracted text by default. It uses only processed archive items and excludes `needs_review` items unless explicitly requested.
+
 ## SQLite proposal
 
-Do not implement these migrations in the design phase.
+These tables are additive and do not rewrite existing archive data.
 
 Proposed tables:
 
@@ -319,15 +346,26 @@ Recommended defaults for first implementation:
 - keep generated notes as `draft`
 - require evidence item ids for every relation/theme/note
 
-## Next implementation goal
+## Readiness implementation before synthesis
 
-Build the local insight synthesis prototype.
+Before generating insight notes, use graph and archive readiness commands:
+
+- `darchive interests`
+- `darchive concepts`
+- `darchive graph quality`
+- `darchive reprocess-plan`
+- read-only `darchive related <capture-id>`
+
+These commands should show whether the archive has enough useful interests, topics, concepts, insight seeds, questions, and relation candidates for synthesis.
+When `darchive reprocess-plan` finds weak or fallback-processed archive items, repair those rows before generating themes or notes. Otherwise the synthesis layer will amplify poor classification instead of building on the user's real interests.
+
+## Later implementation goal
+
+Build the Telegram delivery layer only after local draft review is useful.
 
 Scope:
-- add additive SQLite tables for `archive_relations`, `insight_notes`, and `insight_note_items`
-- add `darchive related <capture-id>`
-- add `darchive insights generate --period weekly`
-- add `darchive insights` and `darchive insights show <id>`
-- keep Codex JSON-only and Python-only SQLite writes
-- keep Telegram output, web UI, calendar, journal, and automation out of scope
+- extend `darchive related` with generated relation candidates after the read-only local version proves useful
+- optionally add Codex-backed insight generation while keeping Python-only SQLite writes
+- add Telegram commands such as `/insights` or a weekly digest only after draft notes are useful locally
+- keep web UI, calendar, journal, and automation out of scope
 - add focused tests and run public preflight

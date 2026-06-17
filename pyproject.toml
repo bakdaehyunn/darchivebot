@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "darchivebot contributors" }]
-dependencies = []
+dependencies = ["pyoxigraph==0.5.8"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]

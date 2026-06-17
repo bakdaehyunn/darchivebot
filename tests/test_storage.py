@@ -139,6 +139,7 @@ def test_init_db_adds_structured_archive_columns_to_existing_db(tmp_path):
 
     with store.connect() as conn:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(archive_items)")}
+        tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert {
         "core_summary",
         "key_points_json",
@@ -154,6 +155,7 @@ def test_init_db_adds_structured_archive_columns_to_existing_db(tmp_path):
         "revisit_reason",
         "insight_seed",
     } <= columns
+    assert {"insight_notes", "insight_note_items"} <= tables
 
 
 def test_list_capture_summaries_filters_by_primary_or_secondary_interest(tmp_path):

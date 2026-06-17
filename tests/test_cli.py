@@ -189,6 +189,359 @@ def test_list_filters_by_interest(tmp_path, monkeypatch, capsys):
     assert "interest=career topic=portfolio" in output
 
 
+def test_interests_and_concepts_inspect_archive_distribution(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path)
+    store = ArchiveStore(settings.state_dir)
+    first_id = add_archive_item(
+        store,
+        message_id=41,
+        title="AI archive",
+        primary_interest="AI",
+        secondary_interests=["career"],
+        topic="agents",
+        tags=["graph", "agents"],
+    )
+    add_archive_item(
+        store,
+        message_id=42,
+        title="Career archive",
+        primary_interest="career",
+        secondary_interests=["AI"],
+        topic="portfolio",
+        tags=["career", "agents"],
+    )
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["interests"]) == 0
+    interests_output = capsys.readouterr().out
+    assert "archive_items=2" in interests_output
+    assert "AI\ttotal=2 primary=1 secondary=1" in interests_output
+    assert "career\ttotal=2 primary=1 secondary=1" in interests_output
+
+    assert main(["concepts", "--json"]) == 0
+    concepts = json.loads(capsys.readouterr().out)
+    assert concepts["archive_items"] == 2
+    assert {"concept": "agents", "count": 2} in concepts["concepts"]
+    assert first_id
+
+
+def test_graph_quality_reports_readiness_issues(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path)
+    store = ArchiveStore(settings.state_dir)
+    add_archive_item(
+        store,
+        message_id=43,
+        title="Fallback archive",
+        primary_interest="other/unknown",
+        secondary_interests=[],
+        topic="",
+        tags=[],
+        classification_reason="local fallback did not classify the capture semantically",
+        confidence=0.25,
+        needs_review=True,
+    )
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["graph", "quality", "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    issues = {item["name"]: item for item in result["issues"]}
+    assert result["archive_items"] == 1
+    assert result["ready_for_synthesis"] is False
+    assert issues["unknown_primary_interest"]["count"] == 1
+    assert issues["fallback_processed"]["count"] == 1
+    assert issues["missing_topic"]["count"] == 1
+
+
+def test_reprocess_plan_lists_weak_candidates_with_reasons_and_history(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path)
+    store = ArchiveStore(settings.state_dir)
+    capture_id = add_archive_item(
+        store,
+        message_id=47,
+        title="Weak fallback archive",
+        primary_interest="other/unknown",
+        secondary_interests=[],
+        topic="",
+        tags=[],
+        classification_reason="local fallback did not classify the capture semantically",
+        confidence=0.25,
+        needs_review=True,
+        key_points=[],
+        insight_seed="",
+    )
+    run_id = store.start_processing_run(capture_id=capture_id, processor="basic")
+    store.finish_processing_run(run_id=run_id, status="processed")
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["reprocess-plan", "--json"]) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["candidate_count"] == 1
+    candidate = result["candidates"][0]
+    reason_names = {item["name"] for item in candidate["candidate_reasons"]}
+    assert candidate["capture_id"] == capture_id
+    assert candidate["current"]["primary_interest"] == "other/unknown"
+    assert candidate["current"]["topic"] == ""
+    assert candidate["current"]["confidence"] == 0.25
+    assert candidate["current"]["needs_review"] is True
+    assert {
+        "unknown_primary_interest",
+        "missing_topic",
+        "missing_insight_seed",
+        "missing_key_points",
+        "missing_concepts",
+        "needs_review",
+        "low_confidence",
+        "fallback_processed",
+        "missing_questions",
+        "missing_relation_candidates",
+    }.issubset(reason_names)
+    assert candidate["processor_history_count"] == 1
+    assert candidate["processor_history"][0]["processor"] == "basic"
+    assert candidate["processor_history"][0]["status"] == "processed"
+
+
+def test_reprocess_plan_filters_candidates(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path)
+    store = ArchiveStore(settings.state_dir)
+    fallback_id = add_archive_item(
+        store,
+        message_id=48,
+        title="Fallback candidate",
+        primary_interest="other/unknown",
+        secondary_interests=[],
+        topic="",
+        tags=[],
+        classification_reason="local fallback",
+        confidence=0.3,
+        needs_review=True,
+    )
+    add_archive_item(
+        store,
+        message_id=49,
+        title="Topic missing only",
+        primary_interest="AI",
+        secondary_interests=[],
+        topic="",
+        tags=["agents"],
+        confidence=0.8,
+        needs_review=False,
+    )
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["reprocess-plan", "--fallback-only", "--json"]) == 0
+    fallback_result = json.loads(capsys.readouterr().out)
+    assert [item["capture_id"] for item in fallback_result["candidates"]] == [fallback_id]
+
+    assert main(["reprocess-plan", "--issue", "missing_topic", "--json"]) == 0
+    topic_result = json.loads(capsys.readouterr().out)
+    assert topic_result["candidate_count"] == 2
+
+    assert main(["reprocess-plan", "--capture-id", fallback_id, "--json"]) == 0
+    capture_result = json.loads(capsys.readouterr().out)
+    assert capture_result["candidate_count"] == 1
+    assert capture_result["candidates"][0]["capture_id"] == fallback_id
+
+
+def test_reprocess_dry_run_does_not_change_archive_rows(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path)
+    store = ArchiveStore(settings.state_dir)
+    capture_id = add_archive_item(
+        store,
+        message_id=50,
+        title="Dry run candidate",
+        primary_interest="other/unknown",
+        secondary_interests=[],
+        topic="",
+        tags=[],
+        classification_reason="local fallback",
+        confidence=0.2,
+        needs_review=True,
+    )
+    before = dict(store.get_archive_item(capture_id))
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["reprocess", "--capture-id", capture_id, "--dry-run", "--json"]) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    after = dict(store.get_archive_item(capture_id))
+    assert result["dry_run"] is True
+    assert result["candidate_count"] == 1
+    assert result["would_reprocess"][0]["capture_id"] == capture_id
+    assert "No SQLite rows were changed" in result["message"]
+    assert after == before
+
+
+def test_related_uses_read_only_shared_archive_signals(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path)
+    store = ArchiveStore(settings.state_dir)
+    source_id = add_archive_item(
+        store,
+        message_id=44,
+        title="Agent memory",
+        primary_interest="AI",
+        secondary_interests=["career"],
+        topic="agents",
+        tags=["graph", "memory"],
+    )
+    related_id = add_archive_item(
+        store,
+        message_id=45,
+        title="Agent workflow",
+        primary_interest="AI",
+        secondary_interests=[],
+        topic="agents",
+        tags=["graph", "workflow"],
+    )
+    add_archive_item(
+        store,
+        message_id=46,
+        title="Unrelated",
+        primary_interest="sports",
+        secondary_interests=[],
+        topic="baseball",
+        tags=["pitching"],
+    )
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["related", source_id, "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["capture_id"] == source_id
+    assert [item["capture_id"] for item in result["related"]] == [related_id]
+    assert result["related"][0]["score"] > 0
+    assert "agents" in result["related"][0]["shared_topics"]
+    assert "graph" in result["related"][0]["shared_concepts"]
+
+
+def test_insights_generate_dry_run_uses_processed_review_ready_items_without_raw_text(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path)
+    store = ArchiveStore(settings.state_dir)
+    first_id = add_archive_item(
+        store,
+        message_id=51,
+        title="Agent archive direction",
+        primary_interest="AI",
+        secondary_interests=["career"],
+        topic="agents",
+        tags=["graph", "memory"],
+        raw_text="SECRET RAW TEXT ONE",
+    )
+    second_id = add_archive_item(
+        store,
+        message_id=52,
+        title="Agent workflow direction",
+        primary_interest="AI",
+        secondary_interests=["technology"],
+        topic="agents",
+        tags=["graph", "workflow"],
+        raw_text="SECRET RAW TEXT TWO",
+    )
+    review_id = add_archive_item(
+        store,
+        message_id=53,
+        title="Needs review archive",
+        primary_interest="AI",
+        secondary_interests=[],
+        topic="agents",
+        tags=["review"],
+        needs_review=True,
+        raw_text="SECRET REVIEW TEXT",
+    )
+    for capture_id in (first_id, second_id, review_id):
+        store.mark_capture_status(capture_id, "processed")
+    first_archive_id = store.get_archive_item(first_id)["id"]
+    second_archive_id = store.get_archive_item(second_id)["id"]
+    review_archive_id = store.get_archive_item(review_id)["id"]
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["insights", "generate", "--period", "weekly", "--dry-run", "--json"]) == 0
+
+    output = capsys.readouterr().out
+    result = json.loads(output)
+    note = result["would_create"]
+    assert result["status"] == "dry-run"
+    assert note["review_status"] == "draft"
+    assert note["raw_codex_json"]["raw_text_included"] is False
+    assert set(note["notable_archive_item_ids"]) == {first_archive_id, second_archive_id}
+    assert review_archive_id not in note["notable_archive_item_ids"]
+    assert "SECRET RAW TEXT" not in output
+
+
+def test_insights_generate_creates_lists_and_shows_draft_with_evidence(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path)
+    store = ArchiveStore(settings.state_dir)
+    first_id = add_archive_item(
+        store,
+        message_id=54,
+        title="Personal graph memory",
+        primary_interest="AI",
+        secondary_interests=["career"],
+        topic="agents",
+        tags=["graph", "memory"],
+    )
+    second_id = add_archive_item(
+        store,
+        message_id=55,
+        title="Personal graph workflow",
+        primary_interest="AI",
+        secondary_interests=["technology"],
+        topic="agents",
+        tags=["graph", "workflow"],
+    )
+    for capture_id in (first_id, second_id):
+        store.mark_capture_status(capture_id, "processed")
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["insights", "generate", "--period", "weekly", "--json"]) == 0
+
+    generated = json.loads(capsys.readouterr().out)
+    insight_id = generated["insight_id"]
+    assert generated["status"] == "created"
+    assert generated["note"]["review_status"] == "draft"
+    assert len(generated["note"]["notable_archive_item_ids"]) == 2
+
+    assert main(["insights"]) == 0
+    list_output = capsys.readouterr().out
+    assert insight_id in list_output
+    assert "draft" in list_output
+    assert "evidence=2" in list_output
+
+    assert main(["insights", "show", insight_id, "--json"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["id"] == insight_id
+    assert shown["review_status"] == "draft"
+    assert shown["evidence_count"] == 2
+    assert {item["capture_status"] for item in shown["evidence_items"]} == {"processed"}
+    assert all(item["archive_item_id"] for item in shown["evidence_items"])
+    assert "raw_extracted_text" not in json.dumps(shown, ensure_ascii=False)
+
+
+def test_insights_generate_fails_safely_when_archive_quality_is_too_low(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path)
+    store = ArchiveStore(settings.state_dir)
+    weak_id = add_archive_item(
+        store,
+        message_id=56,
+        title="Weak archive",
+        primary_interest="other/unknown",
+        secondary_interests=[],
+        topic="",
+        tags=[],
+        confidence=0.2,
+        needs_review=True,
+    )
+    store.mark_capture_status(weak_id, "processed")
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["insights", "generate", "--period", "weekly", "--dry-run", "--json"]) == 1
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "not_enough_evidence"
+    assert result["eligible_count"] == 0
+    assert "reprocess-plan" in result["next_step"]
+    assert store.list_insight_notes() == []
+
+
 def test_show_displays_structured_archive_item(tmp_path, monkeypatch, capsys):
     settings = make_cli_settings(tmp_path)
     store = ArchiveStore(settings.state_dir)
@@ -315,6 +668,208 @@ def test_graph_export_writes_jsonld_under_local_graph(tmp_path, monkeypatch, cap
     assert "exported 1 archive items" in output
     assert graph_path.exists()
     assert "darch:ArchiveItem" in graph_path.read_text(encoding="utf-8")
+
+
+def test_graph_export_json_omits_raw_text_by_default(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path)
+    store = ArchiveStore(settings.state_dir)
+    capture_id = store.add_capture(
+        capture_key="chat:32",
+        chat_id="chat",
+        message_id=32,
+        chat_type="private",
+        chat_title="me",
+        sender_user_id="42",
+        sender_name="User",
+        message_date=None,
+        text="민감한 원문",
+        caption="",
+        content_kind="text",
+        raw_message={"message_id": 32},
+    )
+    store.upsert_archive_item(
+        capture_id,
+        {
+            "title": "그래프 프라이버시",
+            "core_summary": "요약만 내보냄",
+            "raw_extracted_text": "민감한 원문 전체",
+            "source_language": "ko",
+            "primary_interest": "AI",
+            "confidence": 0.8,
+            "needs_review": False,
+        },
+    )
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["graph", "export", "--json"]) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    graph_path = tmp_path / ".local" / "graph" / "darchivebot.jsonld"
+    graph_text = graph_path.read_text(encoding="utf-8")
+    assert result["raw_text_included"] is False
+    assert "darch:rawExtractedText" not in graph_text
+    assert "민감한 원문 전체" not in graph_text
+
+
+def test_graph_init_creates_semantic_store(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path)
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["graph", "init"]) == 0
+
+    output = capsys.readouterr().out
+    semantic_store_path = tmp_path / ".local" / "graph" / "semantic-store"
+    assert "initialized semantic graph store" in output
+    assert semantic_store_path.exists()
+
+
+def test_graph_sync_stats_and_store_export_use_semantic_store(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path)
+    store = ArchiveStore(settings.state_dir)
+    capture_id = store.add_capture(
+        capture_key="chat:33",
+        chat_id="chat",
+        message_id=33,
+        chat_type="private",
+        chat_title="me",
+        sender_user_id="42",
+        sender_name="User",
+        message_date=None,
+        text="그래프 통계",
+        caption="",
+        content_kind="text",
+        raw_message={"message_id": 33},
+    )
+    store.upsert_archive_item(
+        capture_id,
+        {
+            "title": "그래프 통계",
+            "core_summary": "통계 요약",
+            "source_language": "ko",
+            "primary_interest": "AI",
+            "confidence": 0.8,
+            "needs_review": False,
+        },
+    )
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["graph", "sync"]) == 0
+    sync_output = capsys.readouterr().out
+    assert "synced 1 archive items" in sync_output
+    semantic_store_path = tmp_path / ".local" / "graph" / "semantic-store"
+    assert semantic_store_path.exists()
+
+    assert main(["graph", "store-export"]) == 0
+    store_export_output = capsys.readouterr().out
+    semantic_export_path = tmp_path / ".local" / "graph" / "semantic-store.nq"
+    assert "exported semantic graph store" in store_export_output
+    assert semantic_export_path.exists()
+
+    capsys.readouterr()
+    assert main(["graph", "stats"]) == 0
+
+    output = capsys.readouterr().out
+    assert "archive_items=1" in output
+    assert "quads=" in output
+    assert "raw_text_included=false" in output
+
+
+def test_process_export_graph_refreshes_after_successful_processing(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path, codex_enabled=False)
+    store = ArchiveStore(settings.state_dir)
+    store.add_capture(
+        capture_key="chat:34",
+        chat_id="chat",
+        message_id=34,
+        chat_type="private",
+        chat_title="me",
+        sender_user_id="42",
+        sender_name="User",
+        message_date=None,
+        text="처리 후 그래프",
+        caption="",
+        content_kind="text",
+        raw_message={"message_id": 34},
+    )
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["process", "--no-codex", "--export-graph"]) == 0
+
+    output = capsys.readouterr().out
+    semantic_store_path = tmp_path / ".local" / "graph" / "semantic-store"
+    jsonld_graph_path = tmp_path / ".local" / "graph" / "darchivebot.jsonld"
+    assert "semantic graph synced 1 archive items" in output
+    assert "jsonld graph exported 1 archive items" in output
+    assert semantic_store_path.exists()
+    assert jsonld_graph_path.exists()
+    payload = json.loads(jsonld_graph_path.read_text(encoding="utf-8"))
+    assert payload["metadata"]["archive_items"] == 1
+
+
+def test_process_export_graph_does_not_refresh_when_nothing_processed(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path, codex_enabled=False)
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["process", "--no-codex", "--export-graph"]) == 0
+
+    output = capsys.readouterr().out
+    semantic_store_path = tmp_path / ".local" / "graph" / "semantic-store"
+    jsonld_graph_path = tmp_path / ".local" / "graph" / "darchivebot.jsonld"
+    assert output.strip() == "nothing to process"
+    assert not semantic_store_path.exists()
+    assert not jsonld_graph_path.exists()
+
+
+def add_archive_item(
+    store: ArchiveStore,
+    *,
+    message_id: int,
+    title: str,
+    primary_interest: str,
+    secondary_interests: list[str],
+    topic: str,
+    tags: list[str],
+    classification_reason: str = "classified by test",
+    confidence: float = 0.8,
+    needs_review: bool = False,
+    key_points: list[str] | None = None,
+    insight_seed: str = "connect later",
+    raw_text: str | None = None,
+) -> str:
+    capture_id = store.add_capture(
+        capture_key=f"chat:{message_id}",
+        chat_id="chat",
+        message_id=message_id,
+        chat_type="private",
+        chat_title="me",
+        sender_user_id="42",
+        sender_name="User",
+        message_date=None,
+        text=title,
+        caption="",
+        content_kind="text",
+        raw_message={"message_id": message_id},
+    )
+    store.upsert_archive_item(
+        capture_id,
+        {
+            "title": title,
+            "core_summary": f"{title} summary",
+            "key_points": [f"{title} point"] if key_points is None else key_points,
+            "raw_extracted_text": title if raw_text is None else raw_text,
+            "source_language": "en",
+            "primary_interest": primary_interest,
+            "secondary_interests": secondary_interests,
+            "topic": topic,
+            "tags": tags,
+            "classification_reason": classification_reason,
+            "revisit_priority": "medium",
+            "insight_seed": insight_seed,
+            "confidence": confidence,
+            "needs_review": needs_review,
+        },
+    )
+    return capture_id
 
 
 def make_cli_settings(

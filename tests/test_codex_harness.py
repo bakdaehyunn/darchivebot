@@ -20,6 +20,8 @@ def test_ensure_capture_schema_writes_required_schema(tmp_path):
     assert "topic" in payload["required"]
     assert "revisit_priority" in payload["required"]
     assert "insight_seed" in payload["required"]
+    assert "questions" in payload["required"]
+    assert "relation_candidates" in payload["required"]
     assert payload["additionalProperties"] is False
 
 
@@ -29,6 +31,8 @@ def test_prompt_requires_screenshot_core_extraction_without_sqlite_writes():
     assert "starter interest taxonomy" in PROMPT
     assert "primary_interest" in PROMPT
     assert "insight_seed" in PROMPT
+    assert "questions" in PROMPT
+    assert "relation_candidates" in PROMPT
     assert "Do not modify files or write to SQLite" in PROMPT
     assert "Python will validate your JSON and write SQLite" in PROMPT
 
@@ -55,6 +59,8 @@ def test_validate_codex_item_rejects_mismatched_capture_id():
                 "revisit_priority": "medium",
                 "revisit_reason": "",
                 "insight_seed": "",
+                "questions": [],
+                "relation_candidates": [],
                 "dates_mentioned": [],
                 "people_mentioned": [],
                 "action_candidates": [],
@@ -83,6 +89,8 @@ def test_validate_codex_item_normalizes_new_fields_with_old_fallbacks():
             "revisit_priority": "urgent",
             "revisit_reason": "compare later",
             "insight_seed": "connects AI and work systems",
+            "questions": [" what should connect later? "],
+            "relation_candidates": [" agents and archives "],
             "dates_mentioned": [],
             "people_mentioned": [],
             "action_candidates": [],
@@ -102,4 +110,6 @@ def test_validate_codex_item_normalizes_new_fields_with_old_fallbacks():
     assert item["topic"] == "agents"
     assert item["revisit_priority"] == "medium"
     assert item["insight_seed"] == "connects AI and work systems"
+    assert item["questions"] == ["what should connect later?"]
+    assert item["relation_candidates"] == ["agents and archives"]
     assert item["confidence"] == 1.0

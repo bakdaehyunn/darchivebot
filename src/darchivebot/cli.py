@@ -10,7 +10,24 @@ from typing import Any
 from darchivebot.config import DEFAULT_ENV_FILE, ROOT, Settings, ensure_local_dirs, get_settings, load_env
 from darchivebot.doctor import run_doctor
 from darchivebot.graph import default_graph_path, export_graph
+from darchivebot.insights import generate_insight_note, list_insight_notes, show_insight_note
 from darchivebot.processor import CaptureProcessor, format_results
+from darchivebot.readiness import (
+    ISSUE_NAMES,
+    concept_summary,
+    graph_quality_summary,
+    interest_summary,
+    related_captures,
+    reprocess_plan,
+)
+from darchivebot.semantic_graph import (
+    default_semantic_export_path,
+    default_semantic_store_path,
+    export_semantic_store,
+    init_semantic_store,
+    semantic_store_stats,
+    sync_semantic_store,
+)
 from darchivebot.storage import ArchiveStore
 from darchivebot.telegram import (
     DEFAULT_BOT_COMMANDS,
@@ -68,6 +85,11 @@ def main(argv: list[str] | None = None) -> int:
     p_process.add_argument("--limit", type=int)
     p_process.add_argument("--dry-run", action="store_true")
     p_process.add_argument("--no-codex", action="store_true", help="Use the deterministic fallback processor")
+    p_process.add_argument(
+        "--export-graph",
+        action="store_true",
+        help="Refresh the semantic graph store and JSON-LD export after processing",
+    )
     p_process.add_argument("--json", action="store_true")
 
     p_pending = sub.add_parser("pending", help="Preview pending captures and processor inputs")
@@ -75,10 +97,54 @@ def main(argv: list[str] | None = None) -> int:
     p_pending.add_argument("--no-codex", action="store_true")
     p_pending.add_argument("--json", action="store_true")
 
+    p_reprocess_plan = sub.add_parser("reprocess-plan", help="Plan safe archive-quality reprocessing candidates")
+    p_reprocess_plan.add_argument("--limit", type=int, default=20)
+    p_reprocess_plan.add_argument("--issue", choices=ISSUE_NAMES)
+    p_reprocess_plan.add_argument("--fallback-only", action="store_true")
+    p_reprocess_plan.add_argument("--needs-review-only", action="store_true")
+    p_reprocess_plan.add_argument("--capture-id")
+    p_reprocess_plan.add_argument("--json", action="store_true")
+
+    p_reprocess = sub.add_parser("reprocess", help="Preview explicit reprocessing; actual rewrites are not enabled yet")
+    p_reprocess.add_argument("--capture-id")
+    p_reprocess.add_argument("--limit", type=int, default=20)
+    p_reprocess.add_argument("--issue", choices=ISSUE_NAMES)
+    p_reprocess.add_argument("--fallback-only", action="store_true")
+    p_reprocess.add_argument("--needs-review-only", action="store_true")
+    p_reprocess.add_argument("--dry-run", action="store_true", required=True)
+    p_reprocess.add_argument("--json", action="store_true")
+
     p_list = sub.add_parser("list", help="List recent captures")
     p_list.add_argument("--limit", type=int, default=20)
     p_list.add_argument("--interest", help="Only show archived captures matching an interest")
     p_list.add_argument("--json", action="store_true")
+
+    p_interests = sub.add_parser("interests", help="Inspect archive interest distribution")
+    p_interests.add_argument("--limit", type=int, default=20)
+    p_interests.add_argument("--json", action="store_true")
+
+    p_concepts = sub.add_parser("concepts", help="Inspect archive concept/tag distribution")
+    p_concepts.add_argument("--limit", type=int, default=20)
+    p_concepts.add_argument("--json", action="store_true")
+
+    p_related = sub.add_parser("related", help="Inspect read-only related captures from local graph signals")
+    p_related.add_argument("capture_id")
+    p_related.add_argument("--limit", type=int, default=10)
+    p_related.add_argument("--json", action="store_true")
+
+    p_insights = sub.add_parser("insights", help="List or generate local draft insight notes")
+    p_insights.add_argument("--limit", type=int, default=20)
+    p_insights.add_argument("--json", action="store_true")
+    insights_sub = p_insights.add_subparsers(dest="insights_cmd")
+    p_insights_generate = insights_sub.add_parser("generate", help="Generate a local draft insight note")
+    p_insights_generate.add_argument("--period", choices=["weekly"], default="weekly")
+    p_insights_generate.add_argument("--dry-run", action="store_true")
+    p_insights_generate.add_argument("--include-needs-review", action="store_true")
+    p_insights_generate.add_argument("--limit", type=int, default=20)
+    p_insights_generate.add_argument("--json", action="store_true")
+    p_insights_show = insights_sub.add_parser("show", help="Show one local draft insight note")
+    p_insights_show.add_argument("insight_id")
+    p_insights_show.add_argument("--json", action="store_true")
 
     p_show = sub.add_parser("show", help="Show one capture")
     p_show.add_argument("capture_id")
@@ -86,10 +152,29 @@ def main(argv: list[str] | None = None) -> int:
 
     p_graph = sub.add_parser("graph", help="Export ontology-oriented local graph data")
     graph_sub = p_graph.add_subparsers(dest="graph_cmd", required=True)
+    p_graph_init = graph_sub.add_parser("init", help="Initialize the local semantic graph store")
+    p_graph_init.add_argument("--path", type=Path)
+    p_graph_init.add_argument("--json", action="store_true")
+    p_graph_sync = graph_sub.add_parser("sync", help="Rebuild the semantic graph store from SQLite archive rows")
+    p_graph_sync.add_argument("--path", type=Path)
+    p_graph_sync.add_argument("--limit", type=int)
+    p_graph_sync.add_argument("--include-raw-text", action="store_true")
+    p_graph_sync.add_argument("--json", action="store_true")
+    p_graph_store_export = graph_sub.add_parser("store-export", help="Dump the semantic graph store as N-Quads")
+    p_graph_store_export.add_argument("--path", type=Path)
+    p_graph_store_export.add_argument("--output", type=Path)
+    p_graph_store_export.add_argument("--json", action="store_true")
     p_graph_export = graph_sub.add_parser("export", help="Export archive items as JSON-LD")
     p_graph_export.add_argument("--output", type=Path)
     p_graph_export.add_argument("--limit", type=int)
+    p_graph_export.add_argument("--include-raw-text", action="store_true")
     p_graph_export.add_argument("--json", action="store_true")
+    p_graph_stats = graph_sub.add_parser("stats", help="Show local semantic graph store stats")
+    p_graph_stats.add_argument("--path", type=Path)
+    p_graph_stats.add_argument("--json", action="store_true")
+    p_graph_quality = graph_sub.add_parser("quality", help="Inspect archive readiness for graph and viewpoint work")
+    p_graph_quality.add_argument("--limit", type=int, default=20)
+    p_graph_quality.add_argument("--json", action="store_true")
 
     args = parser.parse_args(argv)
     load_env()
@@ -143,7 +228,19 @@ def main(argv: list[str] | None = None) -> int:
             use_codex=False if args.no_codex else None,
             progress=None if args.json or args.dry_run else print_process_progress,
         )
-        print(format_results(results, json_output=args.json))
+        semantic_graph_result = None
+        jsonld_graph_result = None
+        if args.export_graph and not args.dry_run and any(item.get("status") == "processed" for item in results):
+            semantic_graph_result = sync_semantic_store(store, default_semantic_store_path(settings.root))
+            jsonld_graph_result = export_graph(store, default_graph_path(settings.root))
+        print(
+            format_process_and_graph_results(
+                results,
+                semantic_graph_result=semantic_graph_result,
+                jsonld_graph_result=jsonld_graph_result,
+                json_output=args.json,
+            )
+        )
         return 0 if not any(item.get("status") == "failed" for item in results) else 1
     if args.cmd == "pending":
         processor = CaptureProcessor(settings, store)
@@ -154,8 +251,45 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(format_results(results, json_output=args.json))
         return 0
+    if args.cmd == "reprocess-plan":
+        return reprocess_plan_cmd(
+            store,
+            limit=args.limit,
+            issue=args.issue or "",
+            fallback_only=args.fallback_only,
+            needs_review_only=args.needs_review_only,
+            capture_id=args.capture_id or "",
+            json_output=args.json,
+        )
+    if args.cmd == "reprocess":
+        return reprocess_dry_run_cmd(
+            store,
+            limit=args.limit,
+            issue=args.issue or "",
+            fallback_only=args.fallback_only,
+            needs_review_only=args.needs_review_only,
+            capture_id=args.capture_id or "",
+            json_output=args.json,
+        )
     if args.cmd == "list":
         return list_cmd(store, limit=args.limit, interest=args.interest or "", json_output=args.json)
+    if args.cmd == "interests":
+        return interests_cmd(store, limit=args.limit, json_output=args.json)
+    if args.cmd == "concepts":
+        return concepts_cmd(store, limit=args.limit, json_output=args.json)
+    if args.cmd == "related":
+        return related_cmd(store, capture_id=args.capture_id, limit=args.limit, json_output=args.json)
+    if args.cmd == "insights":
+        return insights_cmd(
+            store,
+            action=args.insights_cmd or "list",
+            period=getattr(args, "period", "weekly"),
+            dry_run=getattr(args, "dry_run", False),
+            include_needs_review=getattr(args, "include_needs_review", False),
+            limit=getattr(args, "limit", 20),
+            insight_id=getattr(args, "insight_id", ""),
+            json_output=args.json,
+        )
     if args.cmd == "show":
         return show_cmd(store, capture_id=args.capture_id, json_output=args.json)
     if args.cmd == "graph":
@@ -163,8 +297,11 @@ def main(argv: list[str] | None = None) -> int:
             settings,
             store,
             action=args.graph_cmd,
-            output_path=args.output,
-            limit=args.limit,
+            output_path=getattr(args, "output", None),
+            stats_path=getattr(args, "path", None),
+            limit=getattr(args, "limit", None),
+            quality_limit=getattr(args, "limit", 20),
+            include_raw_text=getattr(args, "include_raw_text", False),
             json_output=args.json,
         )
     return 2
@@ -250,7 +387,7 @@ def setup_cmd(
     if install_launchd:
         return install_launch_agent(settings.root, dry_run=dry_run)
     print("setup complete")
-    print("Normal operation: run `scripts/install_launch_agent.sh` so launchd keeps capture running and processes every 5 minutes.")
+    print("Normal operation: run `scripts/install_launch_agent.sh` so launchd keeps capture running, processes every 5 minutes, and refreshes the semantic graph after successful processing.")
     print("Test/debug mode: run `darchive telegram`, `darchive pending`, or `darchive process` directly when checking behavior.")
     print("For personal archives, a 1:1 Telegram chat is recommended. For groups, disable BotFather Group Privacy.")
     return 0
@@ -367,6 +504,207 @@ def list_cmd(store: ArchiveStore, limit: int, interest: str, json_output: bool) 
     return 0
 
 
+def reprocess_plan_cmd(
+    store: ArchiveStore,
+    *,
+    limit: int,
+    issue: str,
+    fallback_only: bool,
+    needs_review_only: bool,
+    capture_id: str,
+    json_output: bool,
+) -> int:
+    result = reprocess_plan(
+        store,
+        limit=limit,
+        issue=issue,
+        fallback_only=fallback_only,
+        needs_review_only=needs_review_only,
+        capture_id=capture_id,
+    )
+    if json_output:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    print(f"candidate_count={result['candidate_count']} showing={len(result['candidates'])}")
+    if not result["candidates"]:
+        print("no reprocess candidates")
+        return 0
+    for item in result["candidates"]:
+        reasons = ",".join(reason["name"] for reason in item["candidate_reasons"])
+        history = ",".join(f"{run['processor']}:{run['status']}" for run in item["processor_history"]) or "none"
+        history_count = item.get("processor_history_count", len(item["processor_history"]))
+        history_suffix = f"+{history_count - len(item['processor_history'])}" if history_count > len(item["processor_history"]) else ""
+        current = item["current"]
+        print(
+            f"{item['capture_id']}\tkind={item['content_kind']}\t"
+            f"interest={current['primary_interest'] or '-'} topic={current['topic'] or '-'} "
+            f"confidence={current['confidence']} needs_review={str(current['needs_review']).lower()}\t"
+            f"reasons={reasons}\thistory={history}{history_suffix}\t{item['title']}"
+        )
+    print(result["next_step"])
+    return 0
+
+
+def reprocess_dry_run_cmd(
+    store: ArchiveStore,
+    *,
+    limit: int,
+    issue: str,
+    fallback_only: bool,
+    needs_review_only: bool,
+    capture_id: str,
+    json_output: bool,
+) -> int:
+    result = reprocess_plan(
+        store,
+        limit=limit,
+        issue=issue,
+        fallback_only=fallback_only,
+        needs_review_only=needs_review_only,
+        capture_id=capture_id,
+    )
+    payload = {
+        "dry_run": True,
+        "would_reprocess": result["candidates"],
+        "candidate_count": result["candidate_count"],
+        "message": "No SQLite rows were changed. Actual reprocessing is intentionally not enabled in this command yet.",
+    }
+    if json_output:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    print(f"[dry-run] would reprocess {len(result['candidates'])} of {result['candidate_count']} candidates")
+    for item in result["candidates"]:
+        reasons = ",".join(reason["name"] for reason in item["candidate_reasons"])
+        print(f"{item['capture_id']}\treasons={reasons}\t{item['title']}")
+    print(payload["message"])
+    return 0
+
+
+def interests_cmd(store: ArchiveStore, limit: int, json_output: bool) -> int:
+    result = interest_summary(store, limit=limit)
+    if json_output:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    if not result["interests"]:
+        print("no interests")
+        return 0
+    print(f"archive_items={result['archive_items']}")
+    for item in result["interests"]:
+        print(
+            f"{item['interest']}\ttotal={item['total_count']} "
+            f"primary={item['primary_count']} secondary={item['secondary_count']}"
+        )
+    return 0
+
+
+def concepts_cmd(store: ArchiveStore, limit: int, json_output: bool) -> int:
+    result = concept_summary(store, limit=limit)
+    if json_output:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    if not result["concepts"]:
+        print("no concepts")
+        return 0
+    print(f"archive_items={result['archive_items']}")
+    for item in result["concepts"]:
+        print(f"{item['concept']}\tcount={item['count']}")
+    return 0
+
+
+def related_cmd(store: ArchiveStore, capture_id: str, limit: int, json_output: bool) -> int:
+    result = related_captures(store, capture_id, limit=limit)
+    if result is None:
+        print(f"[FAIL] archived capture not found: {capture_id}")
+        return 1
+    if json_output:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    if not result["related"]:
+        print(f"no related captures for {result['capture_id']}")
+        return 0
+    print(f"capture_id={result['capture_id']} archive_item_id={result['archive_item_id']}")
+    for item in result["related"]:
+        reasons = "; ".join(item["reasons"]) if item["reasons"] else "-"
+        print(f"{item['capture_id']}\tscore={item['score']}\t{item['title']}\t{reasons}")
+    return 0
+
+
+def insights_cmd(
+    store: ArchiveStore,
+    *,
+    action: str,
+    period: str,
+    dry_run: bool,
+    include_needs_review: bool,
+    limit: int,
+    insight_id: str,
+    json_output: bool,
+) -> int:
+    if action == "list":
+        result = list_insight_notes(store, limit=limit)
+        if json_output:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        if not result["notes"]:
+            print("no insight notes")
+            return 0
+        for note in result["notes"]:
+            print(
+                f"{note['id']}\t{note['review_status']}\t{note['period_type']}\t"
+                f"evidence={note['evidence_count']}\t{note['title']}"
+            )
+        return 0
+    if action == "generate":
+        result = generate_insight_note(
+            store,
+            period=period,
+            dry_run=dry_run,
+            include_needs_review=include_needs_review,
+            limit=limit,
+        )
+        if json_output:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0 if result["status"] in {"created", "dry-run"} else 1
+        if result["status"] == "created":
+            note = result["note"]
+            print(
+                f"created draft insight note {result['insight_id']} "
+                f"evidence={len(note['notable_archive_item_ids'])}"
+            )
+            print(note["title"])
+            print(note["summary"])
+            return 0
+        if result["status"] == "dry-run":
+            note = result["would_create"]
+            print(f"[dry-run] would create draft insight note evidence={len(note['notable_archive_item_ids'])}")
+            print(note["title"])
+            print(note["summary"])
+            return 0
+        print(f"[SKIP] {result['message']}")
+        if result.get("next_step"):
+            print(f"next_step: {result['next_step']}")
+        return 1
+    if action == "show":
+        result = show_insight_note(store, insight_id)
+        if result is None:
+            print(f"[FAIL] insight note not found: {insight_id}")
+            return 1
+        if json_output:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        print(f"id: {result['id']}")
+        print(f"status: {result['review_status']}")
+        print(f"period: {result['period_type']} {result['period_start']}..{result['period_end']}")
+        print(f"title: {result['title']}")
+        print(f"summary: {result['summary']}")
+        for theme in result["recurring_themes"]:
+            print(f"theme: {theme.get('type')} {theme.get('name')} evidence={theme.get('evidence_count')}")
+        for item in result["evidence_items"]:
+            print(f"evidence: {item['archive_item_id']} {item['title']}")
+        return 0
+    return 2
+
+
 def show_cmd(store: ArchiveStore, capture_id: str, json_output: bool) -> int:
     row = store.get_capture(capture_id)
     if row is None:
@@ -429,18 +767,82 @@ def graph_cmd(
     *,
     action: str,
     output_path: Path | None,
+    stats_path: Path | None,
     limit: int | None,
+    quality_limit: int,
+    include_raw_text: bool,
     json_output: bool,
 ) -> int:
-    if action != "export":
-        return 2
-    path = output_path or default_graph_path(settings.root)
-    result = export_graph(store, path, limit=limit)
-    if json_output:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    else:
-        print(f"exported {result['archive_items']} archive items to {result['path']}")
-    return 0
+    if action == "init":
+        path = stats_path or default_semantic_store_path(settings.root)
+        result = init_semantic_store(path)
+        if json_output:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(f"initialized semantic graph store at {result['path']}")
+        return 0
+    if action == "sync":
+        path = stats_path or default_semantic_store_path(settings.root)
+        result = sync_semantic_store(store, path, limit=limit, include_raw_text=include_raw_text)
+        if json_output:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            raw_note = " with raw text" if result.get("raw_text_included") else ""
+            print(
+                f"synced {result['synced_archive_items']} archive items "
+                f"({result['quads']} quads){raw_note} to {result['path']}"
+            )
+        return 0
+    if action == "store-export":
+        path = stats_path or default_semantic_store_path(settings.root)
+        out_path = output_path or default_semantic_export_path(settings.root)
+        try:
+            result = export_semantic_store(path, out_path)
+        except FileNotFoundError as exc:
+            print(f"[FAIL] {exc}")
+            return 1
+        if json_output:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(f"exported semantic graph store ({result['quads']} quads) to {result['export_path']}")
+        return 0
+    if action == "export":
+        path = output_path or default_graph_path(settings.root)
+        result = export_graph(store, path, limit=limit, include_raw_text=include_raw_text)
+        if json_output:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            raw_note = " with raw text" if result.get("raw_text_included") else ""
+            print(f"exported {result['archive_items']} archive items ({result['nodes']} nodes){raw_note} to {result['path']}")
+        return 0
+    if action == "stats":
+        path = stats_path or default_semantic_store_path(settings.root)
+        result = semantic_store_stats(path)
+        if json_output:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        elif result["exists"]:
+            print(
+                f"semantic_graph={result['path']} archive_items={result['archive_items']} "
+                f"quads={result['quads']} generated_at={result.get('generated_at', '')} "
+                f"raw_text_included={str(result['raw_text_included']).lower()}"
+            )
+        else:
+            print(f"semantic graph store not found: {result['path']}")
+        return 0 if result["exists"] else 1
+    if action == "quality":
+        result = graph_quality_summary(store, limit=quality_limit)
+        if json_output:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(
+                f"archive_items={result['archive_items']} "
+                f"ready_for_synthesis={str(result['ready_for_synthesis']).lower()}"
+            )
+            for issue in result["issues"]:
+                print(f"{issue['name']}\tcount={issue['count']}")
+            print(f"next_step: {result['next_step']}")
+        return 0
+    return 2
 
 
 def only_allowed_chat_id(settings: Settings) -> str:
@@ -506,6 +908,36 @@ def format_classification_preview(primary_interest: str, topic: str) -> str:
     if topic:
         parts.append(f"topic={topic}")
     return "\t" + " ".join(parts) if parts else ""
+
+
+def format_process_and_graph_results(
+    results: list[dict[str, Any]],
+    *,
+    semantic_graph_result: dict[str, Any] | None,
+    jsonld_graph_result: dict[str, Any] | None,
+    json_output: bool,
+) -> str:
+    if json_output:
+        if semantic_graph_result is None and jsonld_graph_result is None:
+            return format_results(results, json_output=True)
+        payload: dict[str, Any] = {"results": results}
+        if semantic_graph_result is not None:
+            payload["semantic_graph"] = semantic_graph_result
+        if jsonld_graph_result is not None:
+            payload["jsonld_graph"] = jsonld_graph_result
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+    text = format_results(results, json_output=False)
+    if semantic_graph_result is not None:
+        text += (
+            f"\nsemantic graph synced {semantic_graph_result['synced_archive_items']} archive items "
+            f"({semantic_graph_result['quads']} quads) to {semantic_graph_result['path']}"
+        )
+    if jsonld_graph_result is not None:
+        text += (
+            f"\njsonld graph exported {jsonld_graph_result['archive_items']} archive items "
+            f"({jsonld_graph_result['nodes']} nodes) to {jsonld_graph_result['path']}"
+        )
+    return text
 
 
 def print_process_progress(event: dict[str, Any]) -> None:
