@@ -188,6 +188,82 @@ def test_processor_records_failed_codex_run_as_retryable(tmp_path):
     assert row["status"] == "failed_retryable"
 
 
+def test_reprocess_capture_rewrites_archive_item(tmp_path):
+    settings = make_settings(tmp_path, codex_enabled=True)
+    store = ArchiveStore(settings.state_dir)
+    capture_id = add_text_capture(store)
+    store.upsert_archive_item(
+        capture_id,
+        {
+            "title": "Old title",
+            "core_summary": "Old summary",
+            "raw_extracted_text": "Old text",
+            "source_language": "ko",
+            "primary_interest": "other/unknown",
+            "topic": "",
+            "confidence": 0.2,
+            "needs_review": True,
+        },
+    )
+    store.mark_capture_status(capture_id, "processed")
+    fake_codex = FakeCodex()
+
+    result = CaptureProcessor(settings, store, codex=fake_codex, ocr=EmptyOcr()).reprocess_capture(capture_id)
+
+    assert result["status"] == "processed"
+    assert fake_codex.seen_packets[0]["capture_id"] == capture_id
+    row = store.get_capture(capture_id)
+    assert row is not None
+    assert row["status"] == "processed"
+    archive = store.get_archive_item(capture_id)
+    assert archive is not None
+    assert archive["title"] == "정리된 제목"
+    assert archive["primary_interest"] == "AI"
+    assert archive["needs_review"] == 0
+
+
+def test_reprocess_capture_failure_preserves_existing_status_and_archive_item(tmp_path):
+    class FailingCodex:
+        def process_capture(self, packet: dict[str, Any], image_paths: list[Path]) -> dict[str, Any]:
+            raise RuntimeError("codex failed during reprocess")
+
+    settings = make_settings(tmp_path, codex_enabled=True)
+    store = ArchiveStore(settings.state_dir)
+    capture_id = add_text_capture(store)
+    store.upsert_archive_item(
+        capture_id,
+        {
+            "title": "Keep this",
+            "core_summary": "Do not overwrite",
+            "raw_extracted_text": "Original extracted text",
+            "source_language": "ko",
+            "primary_interest": "career",
+            "topic": "writing",
+            "confidence": 0.7,
+            "needs_review": False,
+        },
+    )
+    store.mark_capture_status(capture_id, "processed")
+
+    result = CaptureProcessor(settings, store, codex=FailingCodex(), ocr=EmptyOcr()).reprocess_capture(capture_id)
+
+    assert result["status"] == "failed"
+    row = store.get_capture(capture_id)
+    assert row is not None
+    assert row["status"] == "processed"
+    archive = store.get_archive_item(capture_id)
+    assert archive is not None
+    assert archive["title"] == "Keep this"
+    assert archive["primary_interest"] == "career"
+    with store.connect() as conn:
+        run = conn.execute(
+            "SELECT * FROM processing_runs WHERE capture_id = ? ORDER BY started_at DESC LIMIT 1",
+            (capture_id,),
+        ).fetchone()
+    assert run["status"] == "failed"
+    assert "codex failed during reprocess" in run["error"]
+
+
 def test_processor_skips_empty_capture_without_archive_item(tmp_path):
     settings = make_settings(tmp_path, codex_enabled=True)
     store = ArchiveStore(settings.state_dir)

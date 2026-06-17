@@ -9,7 +9,7 @@ from typing import Any
 
 from darchivebot.config import DEFAULT_ENV_FILE, ROOT, Settings, ensure_local_dirs, get_settings, load_env
 from darchivebot.doctor import run_doctor
-from darchivebot.graph import default_graph_path, export_graph
+from darchivebot.graph import default_graph_path, export_graph as export_jsonld_graph
 from darchivebot.insights import generate_insight_note, list_insight_notes, show_insight_note
 from darchivebot.processor import CaptureProcessor, format_results
 from darchivebot.readiness import (
@@ -105,13 +105,15 @@ def main(argv: list[str] | None = None) -> int:
     p_reprocess_plan.add_argument("--capture-id")
     p_reprocess_plan.add_argument("--json", action="store_true")
 
-    p_reprocess = sub.add_parser("reprocess", help="Preview explicit reprocessing; actual rewrites are not enabled yet")
+    p_reprocess = sub.add_parser("reprocess", help="Reprocess one selected capture, or preview candidates with --dry-run")
     p_reprocess.add_argument("--capture-id")
     p_reprocess.add_argument("--limit", type=int, default=20)
     p_reprocess.add_argument("--issue", choices=ISSUE_NAMES)
     p_reprocess.add_argument("--fallback-only", action="store_true")
     p_reprocess.add_argument("--needs-review-only", action="store_true")
-    p_reprocess.add_argument("--dry-run", action="store_true", required=True)
+    p_reprocess.add_argument("--dry-run", action="store_true")
+    p_reprocess.add_argument("--no-codex", action="store_true", help="Use the deterministic fallback processor")
+    p_reprocess.add_argument("--no-export-graph", action="store_true", help="Do not refresh graph outputs after success")
     p_reprocess.add_argument("--json", action="store_true")
 
     p_list = sub.add_parser("list", help="List recent captures")
@@ -232,7 +234,7 @@ def main(argv: list[str] | None = None) -> int:
         jsonld_graph_result = None
         if args.export_graph and not args.dry_run and any(item.get("status") == "processed" for item in results):
             semantic_graph_result = sync_semantic_store(store, default_semantic_store_path(settings.root))
-            jsonld_graph_result = export_graph(store, default_graph_path(settings.root))
+            jsonld_graph_result = export_jsonld_graph(store, default_graph_path(settings.root))
         print(
             format_process_and_graph_results(
                 results,
@@ -262,13 +264,22 @@ def main(argv: list[str] | None = None) -> int:
             json_output=args.json,
         )
     if args.cmd == "reprocess":
-        return reprocess_dry_run_cmd(
+        if args.dry_run:
+            return reprocess_dry_run_cmd(
+                store,
+                limit=args.limit,
+                issue=args.issue or "",
+                fallback_only=args.fallback_only,
+                needs_review_only=args.needs_review_only,
+                capture_id=args.capture_id or "",
+                json_output=args.json,
+            )
+        return reprocess_cmd(
+            settings,
             store,
-            limit=args.limit,
-            issue=args.issue or "",
-            fallback_only=args.fallback_only,
-            needs_review_only=args.needs_review_only,
             capture_id=args.capture_id or "",
+            use_codex=False if args.no_codex else None,
+            export_graph=not args.no_export_graph,
             json_output=args.json,
         )
     if args.cmd == "list":
@@ -567,7 +578,7 @@ def reprocess_dry_run_cmd(
         "dry_run": True,
         "would_reprocess": result["candidates"],
         "candidate_count": result["candidate_count"],
-        "message": "No SQLite rows were changed. Actual reprocessing is intentionally not enabled in this command yet.",
+        "message": "No SQLite rows were changed. Run `darchive reprocess --capture-id <capture-id>` to reprocess one selected capture.",
     }
     if json_output:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -578,6 +589,44 @@ def reprocess_dry_run_cmd(
         print(f"{item['capture_id']}\treasons={reasons}\t{item['title']}")
     print(payload["message"])
     return 0
+
+
+def reprocess_cmd(
+    settings: Settings,
+    store: ArchiveStore,
+    *,
+    capture_id: str,
+    use_codex: bool | None,
+    export_graph: bool,
+    json_output: bool,
+) -> int:
+    if not capture_id:
+        message = "reprocess requires --capture-id for actual rewrites; use --dry-run to preview candidates"
+        if json_output:
+            print(json.dumps({"status": "error", "message": message}, ensure_ascii=False, indent=2))
+        else:
+            print(message)
+        return 2
+    processor = CaptureProcessor(settings, store)
+    result = processor.reprocess_capture(
+        capture_id,
+        use_codex=use_codex,
+        progress=None if json_output else print_process_progress,
+    )
+    semantic_graph_result = None
+    jsonld_graph_result = None
+    if export_graph and result.get("status") == "processed":
+        semantic_graph_result = sync_semantic_store(store, default_semantic_store_path(settings.root))
+        jsonld_graph_result = export_jsonld_graph(store, default_graph_path(settings.root))
+    print(
+        format_process_and_graph_results(
+            [result],
+            semantic_graph_result=semantic_graph_result,
+            jsonld_graph_result=jsonld_graph_result,
+            json_output=json_output,
+        )
+    )
+    return 0 if result.get("status") == "processed" else 1
 
 
 def interests_cmd(store: ArchiveStore, limit: int, json_output: bool) -> int:
@@ -808,7 +857,7 @@ def graph_cmd(
         return 0
     if action == "export":
         path = output_path or default_graph_path(settings.root)
-        result = export_graph(store, path, limit=limit, include_raw_text=include_raw_text)
+        result = export_jsonld_graph(store, path, limit=limit, include_raw_text=include_raw_text)
         if json_output:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:

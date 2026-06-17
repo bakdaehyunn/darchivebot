@@ -21,6 +21,7 @@ def test_launchd_scripts_reference_bot_and_processor():
     assert "<string>telegram</string>" in install
     assert "<string>process</string>" in install
     assert "<string>--export-graph</string>" in install
+    assert "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" in install
 
 
 def test_preflight_script_checks_private_runtime_files_and_secrets():

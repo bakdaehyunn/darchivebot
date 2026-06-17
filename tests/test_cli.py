@@ -372,6 +372,48 @@ def test_reprocess_dry_run_does_not_change_archive_rows(tmp_path, monkeypatch, c
     assert after == before
 
 
+def test_reprocess_requires_capture_id_for_actual_rewrites(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path)
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["reprocess", "--json"]) == 2
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "error"
+    assert "--capture-id" in result["message"]
+
+
+def test_reprocess_selected_capture_refreshes_graph_after_success(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path, codex_enabled=False)
+    store = ArchiveStore(settings.state_dir)
+    capture_id = add_archive_item(
+        store,
+        message_id=51,
+        title="Selected actual",
+        primary_interest="other/unknown",
+        secondary_interests=[],
+        topic="",
+        tags=[],
+        classification_reason="local fallback",
+        confidence=0.2,
+        needs_review=True,
+    )
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["reprocess", "--capture-id", capture_id, "--no-codex", "--json"]) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    after = dict(store.get_archive_item(capture_id))
+    assert result["results"][0]["capture_id"] == capture_id
+    assert result["results"][0]["status"] == "processed"
+    assert result["semantic_graph"]["synced_archive_items"] == 1
+    assert result["jsonld_graph"]["archive_items"] == 1
+    assert after["core_summary"] == "Selected actual"
+    assert after["primary_interest"] == "other/unknown"
+    assert (tmp_path / ".local" / "graph" / "semantic-store").exists()
+    assert (tmp_path / ".local" / "graph" / "darchivebot.jsonld").exists()
+
+
 def test_related_uses_read_only_shared_archive_signals(tmp_path, monkeypatch, capsys):
     settings = make_cli_settings(tmp_path)
     store = ArchiveStore(settings.state_dir)

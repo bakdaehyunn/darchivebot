@@ -57,91 +57,130 @@ class CaptureProcessor:
         results: list[dict[str, Any]] = []
         codex_enabled = self.settings.codex_enabled if use_codex is None else use_codex
         for capture in captures:
-            capture_id = str(capture["id"])
-            files = self.store.files_for_capture(capture_id)
-            packet = build_capture_packet(capture, files)
-            image_paths = image_paths_for_files(files)
-            processor_name = "codex" if codex_enabled else "basic"
-            if not has_processable_content(packet, files):
-                result = {
+            results.append(
+                self._process_capture_row(
+                    capture,
+                    dry_run=dry_run,
+                    codex_enabled=codex_enabled,
+                    progress=progress,
+                    preserve_status_on_failure=False,
+                )
+            )
+        return results
+
+    def reprocess_capture(
+        self,
+        capture_id: str,
+        *,
+        use_codex: bool | None = None,
+        progress: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        lock_path = self.settings.state_dir / "locks" / "processor.lock"
+        with file_lock(lock_path) as acquired:
+            if not acquired:
+                return {"capture_id": capture_id, "status": "skipped", "reason": "processor lock is already held"}
+            capture = self.store.get_capture(capture_id)
+            if capture is None:
+                return {"capture_id": capture_id, "status": "not_found", "reason": "capture does not exist"}
+            codex_enabled = self.settings.codex_enabled if use_codex is None else use_codex
+            return self._process_capture_row(
+                capture,
+                dry_run=False,
+                codex_enabled=codex_enabled,
+                progress=progress,
+                preserve_status_on_failure=True,
+            )
+
+    def _process_capture_row(
+        self,
+        capture: Any,
+        *,
+        dry_run: bool,
+        codex_enabled: bool,
+        progress: Callable[[dict[str, Any]], None] | None,
+        preserve_status_on_failure: bool,
+    ) -> dict[str, Any]:
+        capture_id = str(capture["id"])
+        files = self.store.files_for_capture(capture_id)
+        packet = build_capture_packet(capture, files)
+        image_paths = image_paths_for_files(files)
+        processor_name = "codex" if codex_enabled else "basic"
+        if not has_processable_content(packet, files):
+            result = {
+                "capture_id": capture_id,
+                "status": "skipped_empty",
+                "processor": processor_name,
+                "content_kind": packet["content_kind"],
+                "file_count": len(files),
+                "reason": "no text, caption, or downloaded files",
+            }
+            if not dry_run and not preserve_status_on_failure:
+                self.store.mark_capture_status(capture_id, "skipped_empty")
+            if progress:
+                progress({"event": "skipped", **result})
+            return result
+        if dry_run:
+            return {
+                "capture_id": capture_id,
+                "status": "dry-run",
+                "processor": processor_name,
+                "content_kind": packet["content_kind"],
+                "file_count": len(files),
+                "image_paths": [str(path) for path in image_paths],
+                "text_preview": preview_text(packet),
+                "packet": packet,
+            }
+        started = time.monotonic()
+        if progress:
+            progress(
+                {
+                    "event": "start",
                     "capture_id": capture_id,
-                    "status": "skipped_empty",
                     "processor": processor_name,
                     "content_kind": packet["content_kind"],
                     "file_count": len(files),
-                    "reason": "no text, caption, or downloaded files",
                 }
-                if not dry_run:
-                    self.store.mark_capture_status(capture_id, "skipped_empty")
-                if progress:
-                    progress({"event": "skipped", **result})
-                results.append(result)
-                continue
-            if dry_run:
-                results.append(
-                    {
-                        "capture_id": capture_id,
-                        "status": "dry-run",
-                        "processor": processor_name,
-                        "content_kind": packet["content_kind"],
-                        "file_count": len(files),
-                        "image_paths": [str(path) for path in image_paths],
-                        "text_preview": preview_text(packet),
-                        "packet": packet,
-                    }
-                )
-                continue
-            started = time.monotonic()
-            if progress:
-                progress(
-                    {
-                        "event": "start",
-                        "capture_id": capture_id,
-                        "processor": processor_name,
-                        "content_kind": packet["content_kind"],
-                        "file_count": len(files),
-                    }
-                )
-            run_id = self.store.start_processing_run(
-                capture_id=capture_id,
-                processor=processor_name,
             )
-            try:
-                if codex_enabled:
-                    item = self.codex.process_capture(packet, image_paths)
-                    item = validate_codex_item(item, capture_id)
-                else:
-                    item = self.basic_extract(packet, files)
-                self.write_item(capture_id, item, source="codex" if codex_enabled else "basic")
-                self.store.mark_capture_status(capture_id, "processed")
-                self.store.finish_processing_run(run_id=run_id, status="processed")
-                elapsed_sec = time.monotonic() - started
-                result = {
-                    "capture_id": capture_id,
-                    "status": "processed",
-                    "processor": processor_name,
-                    "content_kind": packet["content_kind"],
-                    "elapsed_sec": round(elapsed_sec, 2),
-                }
-                if progress:
-                    progress({"event": "finish", **result})
-                results.append(result)
-            except (CodexRunError, ValueError, OSError, RuntimeError) as exc:
+        run_id = self.store.start_processing_run(
+            capture_id=capture_id,
+            processor=processor_name,
+        )
+        try:
+            if codex_enabled:
+                item = self.codex.process_capture(packet, image_paths)
+                item = validate_codex_item(item, capture_id)
+            else:
+                item = self.basic_extract(packet, files)
+            self.write_item(capture_id, item, source="codex" if codex_enabled else "basic")
+            self.store.mark_capture_status(capture_id, "processed")
+            self.store.finish_processing_run(run_id=run_id, status="processed")
+            elapsed_sec = time.monotonic() - started
+            result = {
+                "capture_id": capture_id,
+                "status": "processed",
+                "processor": processor_name,
+                "content_kind": packet["content_kind"],
+                "elapsed_sec": round(elapsed_sec, 2),
+            }
+            if progress:
+                progress({"event": "finish", **result})
+            return result
+        except (CodexRunError, ValueError, OSError, RuntimeError) as exc:
+            if not preserve_status_on_failure:
                 self.store.mark_capture_status(capture_id, "failed_retryable")
-                self.store.finish_processing_run(run_id=run_id, status="failed", error=str(exc)[:4000])
-                elapsed_sec = time.monotonic() - started
-                result = {
-                    "capture_id": capture_id,
-                    "status": "failed",
-                    "processor": processor_name,
-                    "content_kind": packet["content_kind"],
-                    "elapsed_sec": round(elapsed_sec, 2),
-                    "error": str(exc),
-                }
-                if progress:
-                    progress({"event": "failed", **result})
-                results.append(result)
-        return results
+            self.store.finish_processing_run(run_id=run_id, status="failed", error=str(exc)[:4000])
+            elapsed_sec = time.monotonic() - started
+            result = {
+                "capture_id": capture_id,
+                "status": "failed",
+                "processor": processor_name,
+                "content_kind": packet["content_kind"],
+                "elapsed_sec": round(elapsed_sec, 2),
+                "error": str(exc),
+            }
+            if progress:
+                progress({"event": "failed", **result})
+            return result
 
     def basic_extract(self, packet: dict[str, Any], files: list[Any]) -> dict[str, Any]:
         text_parts = [

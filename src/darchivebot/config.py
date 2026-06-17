@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -57,6 +58,29 @@ def resolve_path(raw: str, default: str, root: Path = ROOT) -> Path:
     return path
 
 
+def resolve_executable(raw: str, default: str = "", extra_dirs: tuple[Path, ...] | None = None) -> str:
+    value = (raw or default).strip()
+    if not value:
+        return ""
+    expanded = Path(value).expanduser()
+    if expanded.parent != Path("."):
+        return str(expanded)
+    found = shutil.which(value)
+    if found:
+        return found
+    search_dirs = extra_dirs or (
+        Path("/opt/homebrew/bin"),
+        Path("/usr/local/bin"),
+        Path("/usr/bin"),
+        Path("/bin"),
+    )
+    for directory in search_dirs:
+        candidate = directory / value
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     root: Path
@@ -88,7 +112,7 @@ def get_settings(root: Path = ROOT) -> Settings:
         log_dir=resolve_path(env_str("DARCHIVE_LOG_DIR"), ".local/logs", root),
         media_dir=resolve_path(env_str("DARCHIVE_MEDIA_DIR"), ".local/captures", root),
         codex_enabled=env_bool("DARCHIVE_CODEX_ENABLED", True),
-        codex_bin=env_str("DARCHIVE_CODEX_BIN", "codex"),
+        codex_bin=resolve_executable(env_str("DARCHIVE_CODEX_BIN"), "codex"),
         codex_model=env_str("DARCHIVE_CODEX_MODEL"),
         codex_sandbox=env_str("DARCHIVE_CODEX_SANDBOX", "read-only"),
         codex_ephemeral=env_bool("DARCHIVE_CODEX_EPHEMERAL", True),

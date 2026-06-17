@@ -139,6 +139,7 @@ darchive process --export-graph
 darchive reprocess-plan
 darchive reprocess-plan --json
 darchive reprocess --capture-id <capture-id> --dry-run
+darchive reprocess --capture-id <capture-id>
 darchive graph init
 darchive graph sync
 darchive graph store-export
@@ -164,7 +165,8 @@ darchive send-test --chat-id <telegram-chat-id>
 - `process --export-graph`: 새 항목이 정리되면 RDF semantic store와 lightweight JSON-LD export를 함께 새로 만듭니다.
 - `reprocess-plan`: 이미 정리된 항목 중 분류가 약하거나 fallback으로 처리된 항목을 찾아, 왜 다시 정리할 후보인지 보여줍니다.
 - `reprocess-plan --json`: 후보 목록을 자동화나 점검에 쓰기 좋은 JSON으로 출력합니다.
-- `reprocess --capture-id <capture-id> --dry-run`: 선택한 항목을 다시 정리한다면 무엇을 대상으로 할지 미리 봅니다. 현재는 안전을 위해 실제 DB 수정은 하지 않습니다.
+- `reprocess --capture-id <capture-id> --dry-run`: 선택한 항목을 다시 정리한다면 무엇을 대상으로 할지 미리 봅니다. SQLite row는 바꾸지 않습니다.
+- `reprocess --capture-id <capture-id>`: 명시한 캡처 하나만 다시 정리하고, 성공하면 semantic graph store와 JSON-LD export를 함께 새로 만듭니다. 실패해도 기존 archive row와 처리 완료 상태는 유지합니다.
 - `graph init`: `.local/graph/semantic-store/`에 로컬 RDF 그래프 store를 준비합니다.
 - `graph sync`: SQLite의 검증된 archive row에서 RDF semantic store를 다시 만듭니다.
 - `graph sync --include-raw-text`: semantic store에 원문 전체까지 포함합니다. 로컬 분석 목적일 때만 사용합니다.
@@ -200,7 +202,7 @@ darchive send-test --chat-id <telegram-chat-id>
 
 기술적으로는 Codex가 캡처와 이미지를 읽어 구조화된 JSON을 만들고, Python 코드가 검증한 뒤 SQLite에 저장합니다. RDF semantic store와 JSON-LD export도 검증된 SQLite 행에서 Python 코드가 다시 생성합니다. Codex가 DB나 그래프 파일을 직접 수정하지는 않습니다.
 
-정리 품질이 약한 항목은 `darchive reprocess-plan`으로 먼저 확인합니다. 이 단계는 관련 캡처, 반복 주제, insight note로 넘어가기 전에 아카이브의 관심사, 주제, 핵심 포인트, insight seed가 충분히 채워졌는지 확인하는 안전장치입니다. 실제 재처리는 아직 자동으로 실행하지 않고, `--dry-run`으로 대상만 확인하게 둡니다.
+정리 품질이 약한 항목은 `darchive reprocess-plan`으로 먼저 확인합니다. 이 단계는 관련 캡처, 반복 주제, insight note로 넘어가기 전에 아카이브의 관심사, 주제, 핵심 포인트, insight seed가 충분히 채워졌는지 확인하는 안전장치입니다. 실제 재처리는 `darchive reprocess --capture-id <capture-id>`처럼 하나의 캡처를 명시할 때만 실행합니다.
 
 Draft insight note는 `darchive insights generate --period weekly`로 로컬에만 생성합니다. 이 단계는 Telegram 메시지를 보내지 않습니다. 먼저 SQLite에 draft로 저장하고, `darchive insights show <insight-id>`로 어떤 archive item을 근거로 삼았는지 확인하는 구조입니다. Telegram으로 주간 요약을 보내는 기능은 이 로컬 검토 흐름이 충분히 유용해진 뒤의 별도 단계입니다.
 
@@ -214,6 +216,8 @@ DARCHIVE_CODEX_SANDBOX=read-only
 DARCHIVE_CODEX_EPHEMERAL=true
 DARCHIVE_CODEX_TIMEOUT_SEC=900
 ```
+
+`DARCHIVE_CODEX_BIN=codex`처럼 명령 이름만 넣어도 다카이브봇은 일반 PATH와 Homebrew 기본 경로(`/opt/homebrew/bin`, `/usr/local/bin`)에서 실행 파일을 찾습니다. launchd 환경이 터미널보다 PATH가 짧을 수 있으므로, 문제가 있으면 `/opt/homebrew/bin/codex`처럼 절대 경로로 적어도 됩니다.
 
 ## 앞으로 더해질 수 있는 것
 

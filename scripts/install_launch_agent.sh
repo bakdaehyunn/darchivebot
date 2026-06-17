@@ -23,6 +23,11 @@ cat > "$BOT_PLIST" <<PLIST
   </array>
   <key>WorkingDirectory</key>
   <string>$ROOT</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
@@ -48,6 +53,11 @@ cat > "$PROCESS_PLIST" <<PLIST
   </array>
   <key>WorkingDirectory</key>
   <string>$ROOT</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
   <key>StartInterval</key>
   <integer>300</integer>
   <key>StandardOutPath</key>
