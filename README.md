@@ -34,7 +34,7 @@
 
 첫 번째는 수집입니다. Telegram poller가 허용된 채팅에서 새 메시지를 확인하고, 텍스트와 캡션, 사진, 문서를 로컬 SQLite DB와 `.local/captures/` 폴더에 저장합니다. Telegram에만 의존하지 않도록 원본 파일도 로컬에 내려받습니다.
 
-두 번째는 정리입니다. 예약된 processor가 주기적으로 SQLite에서 아직 정리되지 않은 항목만 찾습니다. 처리할 항목이 없으면 아무 작업 없이 종료하고, 처리할 항목이 있으면 Codex가 캡처와 이미지 내용을 읽어 구조화된 JSON을 반환합니다. Python 코드는 그 JSON을 검증한 뒤 SQLite에 저장하고, 정상 처리된 항목이 있으면 `.local/graph/semantic-store/` RDF 그래프를 새로 만들고 `.local/graph/darchivebot.jsonld`에는 가볍게 볼 수 있는 JSON-LD export를 남깁니다. Codex는 DB나 그래프 파일을 직접 수정하지 않습니다.
+두 번째는 정리입니다. 예약된 processor가 주기적으로 SQLite에서 아직 정리되지 않은 항목만 찾습니다. 처리할 항목이 없으면 아무 작업 없이 종료하고, 처리할 항목이 있으면 Codex가 캡처와 이미지 내용을 읽어 구조화된 JSON을 반환합니다. Python 코드는 그 JSON을 검증한 뒤 SQLite에 저장하고, 정상 처리된 항목이 있으면 `.local/graph/semantic-store/` RDF 그래프를 새로 만들고 `.local/graph/darchivebot.jsonld`에는 가볍게 볼 수 있는 JSON-LD export를 남깁니다. 실패한 항목은 바로 무한 재시도하지 않고 retry/backoff 상태로 남기며, 반복 실패하면 `failed_blocked`로 멈춥니다. Codex는 DB나 그래프 파일을 직접 수정하지 않습니다.
 
 이 구조 덕분에 다카이브봇은 조용히 돌아가면서도 원본 보관, 관심사 분류, 요약, 나중에 다시 볼 이유, 관심사 그래프를 분리해서 남길 수 있습니다.
 
@@ -63,7 +63,7 @@ Viewpoint Layer
 - AI, 커리어, 테크놀로지, 스포츠 같은 관심사와 세부 주제로 분류합니다.
 - 주요 포인트와 원문 텍스트를 함께 남겨 다시 읽기 쉽게 합니다.
 - 저장 이유, 다시 볼 우선순위, 태그를 붙여 나중에 검색하거나 분류할 수 있게 합니다.
-- 나중에 다른 캡처와 연결될 수 있는 작은 insight seed를 남깁니다.
+- 나중에 다른 캡처와 연결될 수 있는 작은 insight seed, 질문, relation candidate를 남깁니다.
 - 검증된 정리 결과를 로컬 RDF 관심사 그래프에 저장해 관계를 읽고 질의할 수 있게 준비합니다.
 - 처리할 새 항목이 없으면 scheduled processor는 조용히 종료합니다.
 
@@ -166,7 +166,7 @@ darchive send-test --chat-id <telegram-chat-id>
 - `reprocess-plan`: 이미 정리된 항목 중 분류가 약하거나 fallback으로 처리된 항목을 찾아, 왜 다시 정리할 후보인지 보여줍니다.
 - `reprocess-plan --json`: 후보 목록을 자동화나 점검에 쓰기 좋은 JSON으로 출력합니다.
 - `reprocess --capture-id <capture-id> --dry-run`: 선택한 항목을 다시 정리한다면 무엇을 대상으로 할지 미리 봅니다. SQLite row는 바꾸지 않습니다.
-- `reprocess --capture-id <capture-id>`: 명시한 캡처 하나만 다시 정리하고, 성공하면 semantic graph store와 JSON-LD export를 함께 새로 만듭니다. 실패해도 기존 archive row와 처리 완료 상태는 유지합니다.
+- `reprocess --capture-id <capture-id>`: 명시한 캡처 하나만 다시 정리하고, 성공하면 현재 archive row를 갱신하고 semantic graph store와 JSON-LD export를 함께 새로 만듭니다. 이전 정리 결과는 archive interpretation history로 남고, 실패해도 기존 archive row와 처리 완료 상태는 유지합니다.
 - `graph init`: `.local/graph/semantic-store/`에 로컬 RDF 그래프 store를 준비합니다.
 - `graph sync`: SQLite의 검증된 archive row에서 RDF semantic store를 다시 만듭니다.
 - `graph sync --include-raw-text`: semantic store에 원문 전체까지 포함합니다. 로컬 분석 목적일 때만 사용합니다.
@@ -198,6 +198,7 @@ darchive send-test --chat-id <telegram-chat-id>
 - 원문 텍스트: 이미지나 메시지에서 읽힌 텍스트
 - 다시 볼 이유와 우선순위: 왜 나중에 다시 볼 만한지
 - insight seed: 나중에 비슷한 항목들과 연결될 수 있는 작은 단서
+- questions / relation candidates: 나중에 Viewpoint Layer에서 묶어 볼 질문과 연결 후보
 - 태그와 언어 정보: 검색과 분류를 위한 보조 정보
 
 기술적으로는 Codex가 캡처와 이미지를 읽어 구조화된 JSON을 만들고, Python 코드가 검증한 뒤 SQLite에 저장합니다. RDF semantic store와 JSON-LD export도 검증된 SQLite 행에서 Python 코드가 다시 생성합니다. Codex가 DB나 그래프 파일을 직접 수정하지는 않습니다.
@@ -239,7 +240,7 @@ scripts/uninstall_launch_agent.sh
 - `com.hennei.darchivebot.telegram`: Telegram polling bot을 계속 실행합니다.
 - `com.hennei.darchivebot.processor`: 5분마다 `darchive process --export-graph`를 실행합니다.
 
-일반 운영에서는 launchd가 poller를 계속 켜고 processor를 5분마다 실행합니다. Processor는 먼저 SQLite에서 pending capture를 확인하고, 없으면 Codex를 호출하지 않고 종료합니다. 처리된 항목이 있을 때만 그래프 export를 실행합니다. `darchive telegram`, `darchive pending`, `darchive process` 직접 실행은 테스트/디버그용입니다.
+일반 운영에서는 launchd가 poller를 계속 켜고 processor를 5분마다 실행합니다. Processor는 먼저 SQLite에서 pending capture와 backoff 시간이 지난 retry 대상만 확인하고, 없으면 Codex를 호출하지 않고 종료합니다. 처리된 항목이 있을 때만 그래프 export를 실행합니다. 반복 실패한 항목은 `failed_blocked`로 멈춰 같은 실패가 5분마다 계속 쌓이지 않게 합니다. `darchive telegram`, `darchive pending`, `darchive process` 직접 실행은 테스트/디버그용입니다.
 
 ## Troubleshooting
 

@@ -12,9 +12,10 @@ Telegram message/photo/document
 
 launchd/cron
   -> darchive process --export-graph
-  -> pending capture packet
+  -> pending capture packet, or retryable failure whose backoff has expired
   -> codex exec with JSON Schema
   -> validated archive_items/extracted_texts SQLite rows
+  -> archive_interpretations audit row for each successful interpretation
   -> if any capture was processed, rebuild semantic graph from validated archive_items SQLite rows
   -> RDF store under .local/graph/semantic-store/
   -> lightweight JSON-LD export under .local/graph/darchivebot.jsonld
@@ -46,7 +47,11 @@ future Viewpoint Layer
 
 Codex is intentionally not allowed to write SQLite directly. Codex reads a bounded capture packet and attached images, returns structured JSON, then Python validates and writes the database. This keeps database mutation deterministic and makes retry/failure handling explicit.
 
-The ontology-native graph layer is a semantic memory, not the raw ingestion store. SQLite remains the source of truth for Telegram capture state and processing runs. The pyoxigraph store under `.local/graph/semantic-store/` is the primary semantic layer for interests, topics, concepts, claims, questions, and relation candidates. JSON-LD remains a lightweight portable export, not a full semantic-store backup. Raw extracted text is omitted from graph output by default and only included with an explicit CLI flag.
+Failed scheduled processing is not retried immediately forever. Captures track `retry_count`, `next_retry_at`, and `last_error`; repeated failures eventually move to `failed_blocked` so launchd cannot create endless identical failure rows every five minutes.
+
+`archive_items` is the current interpreted view of a capture. Every successful write also creates an `archive_interpretations` row with the source, schema/prompt version when available, confidence, review state, and raw structured output. Selected reprocessing can update the current view without erasing prior interpretations.
+
+The ontology-native graph layer is a semantic memory, not the raw ingestion store. SQLite remains the source of truth for Telegram capture state and processing runs. The pyoxigraph store under `.local/graph/semantic-store/` is the primary semantic layer for interests, topics, concepts, claims, questions, and relation candidates. Questions and relation candidates are normalized onto archive rows and remain backward-compatible with older raw Codex JSON. JSON-LD remains a lightweight portable export, not a full semantic-store backup. Raw extracted text is omitted from graph output by default and only included with an explicit CLI flag.
 
 ## Product layers
 
@@ -55,7 +60,7 @@ Capture Layer
   -> Telegram intake and local media storage
 
 Archive Layer
-  -> SQLite source of truth for captures, files, extracted text, archive items, and processing runs
+  -> SQLite source of truth for captures, files, extracted text, archive items, archive interpretations, retry state, and processing runs
 
 Semantic Graph Layer
   -> generated meaning layer for interests, topics, concepts, claims, questions, and relation candidates

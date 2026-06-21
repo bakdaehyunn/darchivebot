@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,8 @@ GRAPH_CONTEXT: dict[str, Any] = {
     "hasSubtopic": {"@id": "darch:hasSubtopic", "@type": "@id"},
     "mentionsConcept": {"@id": "darch:mentionsConcept", "@type": "@id"},
     "makesClaim": {"@id": "darch:makesClaim", "@type": "@id"},
+    "asksQuestion": {"@id": "darch:asksQuestion", "@type": "@id"},
+    "hasRelationCandidate": {"@id": "darch:hasRelationCandidate", "@type": "@id"},
 }
 
 
@@ -86,6 +89,8 @@ def graph_nodes_for_archive_row(row: Any, *, include_raw_text: bool = False) -> 
     key_points = json_list(row["key_points_json"])
     tags = json_list(row["tags_json"])
     secondary_interests = json_list(row["secondary_interests_json"])
+    questions = semantic_json_list(row, "questions_json", "questions")
+    relation_candidates = semantic_json_list(row, "relation_candidates_json", "relation_candidates")
     primary_interest = str(row["primary_interest"] or "").strip()
     topic = str(row["topic"] or "").strip()
     subtopic = str(row["subtopic"] or "").strip()
@@ -111,6 +116,8 @@ def graph_nodes_for_archive_row(row: Any, *, include_raw_text: bool = False) -> 
             "hasSubtopic": topic_id(subtopic) if subtopic else "",
             "mentionsConcept": [concept_id(item) for item in tags],
             "makesClaim": [claim_id(archive_id, index) for index, _ in enumerate(key_points, start=1)],
+            "asksQuestion": [question_id(item) for item in questions],
+            "hasRelationCandidate": [relation_candidate_id(archive_id, item) for item in relation_candidates],
             "updatedAt": str(row["updated_at"] or ""),
         }
     )
@@ -152,6 +159,10 @@ def graph_nodes_for_archive_row(row: Any, *, include_raw_text: bool = False) -> 
                 }
             )
         )
+    for question in questions:
+        nodes.append(named_node(question_id(question), "darch:Question", question))
+    for candidate in relation_candidates:
+        nodes.append(named_node(relation_candidate_id(archive_id, candidate), "darch:RelationCandidate", candidate))
     return nodes
 
 
@@ -167,6 +178,25 @@ def json_list(value: Any) -> list[str]:
     if not isinstance(payload, list):
         return []
     return [str(item).strip() for item in payload if str(item).strip()]
+
+
+def raw_json_list(row: Any, key: str) -> list[str]:
+    try:
+        payload = json.loads(str(row["raw_codex_json"] or "{}"))
+    except json.JSONDecodeError:
+        return []
+    value = payload.get(key)
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def semantic_json_list(row: Any, column: str, raw_key: str) -> list[str]:
+    if column in row.keys():
+        normalized = json_list(row[column])
+        if normalized:
+            return normalized
+    return raw_json_list(row, raw_key)
 
 
 def compact_dict(value: dict[str, Any]) -> dict[str, Any]:
@@ -192,6 +222,18 @@ def concept_id(value: str) -> str:
 
 def claim_id(archive_id: str, index: int) -> str:
     return urn("claim", f"{archive_id}-{index}")
+
+
+def question_id(value: str) -> str:
+    return urn("question", stable_hash(value))
+
+
+def relation_candidate_id(archive_id: str, value: str) -> str:
+    return urn("relation-candidate", stable_hash(f"{archive_id}:{value}"))
+
+
+def stable_hash(value: str) -> str:
+    return hashlib.sha256(value.strip().lower().encode("utf-8")).hexdigest()[:16]
 
 
 def urn(kind: str, value: str) -> str:

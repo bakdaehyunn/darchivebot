@@ -24,6 +24,9 @@ INTEREST_TAXONOMY = [
     "other/unknown",
 ]
 
+CAPTURE_SCHEMA_VERSION = "2026-06-21"
+CAPTURE_PROMPT_VERSION = "2026-06-21"
+
 
 CAPTURE_EXTRACT_SCHEMA: dict[str, Any] = {
     "type": "object",

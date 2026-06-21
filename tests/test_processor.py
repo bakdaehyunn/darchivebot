@@ -36,6 +36,8 @@ class FakeCodex:
             "revisit_priority": "high",
             "revisit_reason": "can shape the archive product direction",
             "insight_seed": "connects AI agents with personal archives",
+            "questions": ["what should this connect to?"],
+            "relation_candidates": ["personal archive workflow"],
             "dates_mentioned": [],
             "people_mentioned": [],
             "action_candidates": [],
@@ -183,9 +185,36 @@ def test_processor_records_failed_codex_run_as_retryable(tmp_path):
     results = CaptureProcessor(settings, store, codex=FailingCodex(), ocr=EmptyOcr()).process_pending()
 
     assert results[0]["status"] == "failed"
+    assert results[0]["capture_status"] == "failed_retryable"
+    assert results[0]["retry_count"] == 1
+    assert results[0]["next_retry_at"]
     row = store.get_capture(capture_id)
     assert row is not None
     assert row["status"] == "failed_retryable"
+    assert row["retry_count"] == 1
+
+
+def test_processor_blocks_capture_after_repeated_scheduled_failures(tmp_path):
+    class FailingCodex:
+        def process_capture(self, packet: dict[str, Any], image_paths: list[Path]) -> dict[str, Any]:
+            raise RuntimeError("codex failed")
+
+    settings = make_settings(tmp_path, codex_enabled=True)
+    store = ArchiveStore(settings.state_dir)
+    capture_id = add_text_capture(store)
+    processor = CaptureProcessor(settings, store, codex=FailingCodex(), ocr=EmptyOcr())
+
+    for expected_retry_count in range(1, 6):
+        with store.connect() as conn:
+            conn.execute("UPDATE captures SET next_retry_at = '2000-01-01T00:00:00+00:00' WHERE id = ?", (capture_id,))
+        results = processor.process_pending()
+        assert results[0]["retry_count"] == expected_retry_count
+
+    row = store.get_capture(capture_id)
+    assert row is not None
+    assert row["status"] == "failed_blocked"
+    assert row["retry_count"] == 5
+    assert processor.process_pending() == []
 
 
 def test_reprocess_capture_rewrites_archive_item(tmp_path):
@@ -220,6 +249,14 @@ def test_reprocess_capture_rewrites_archive_item(tmp_path):
     assert archive["title"] == "정리된 제목"
     assert archive["primary_interest"] == "AI"
     assert archive["needs_review"] == 0
+    interpretations = store.archive_interpretations_for_capture(capture_id)
+    assert len(interpretations) == 2
+    assert interpretations[0]["title"] == "Old title"
+    assert interpretations[0]["source"] == "unknown"
+    assert interpretations[1]["title"] == "정리된 제목"
+    assert interpretations[1]["source"] == "codex"
+    assert interpretations[1]["schema_version"]
+    assert interpretations[1]["prompt_version"]
 
 
 def test_reprocess_capture_failure_preserves_existing_status_and_archive_item(tmp_path):
@@ -255,6 +292,7 @@ def test_reprocess_capture_failure_preserves_existing_status_and_archive_item(tm
     assert archive is not None
     assert archive["title"] == "Keep this"
     assert archive["primary_interest"] == "career"
+    assert len(store.archive_interpretations_for_capture(capture_id)) == 1
     with store.connect() as conn:
         run = conn.execute(
             "SELECT * FROM processing_runs WHERE capture_id = ? ORDER BY started_at DESC LIMIT 1",

@@ -140,10 +140,10 @@ Recommended scope:
 - add `darchive graph quality`
 - add a read-only first version of `darchive related <capture-id>`
 - add `darchive reprocess-plan` for weak/fallback archive items
+- allow explicit selected reprocessing with interpretation history
 - keep all commands local and inspect-first
 - do not generate insight notes yet
 - do not send Telegram summaries
-- do not rewrite existing SQLite rows
 
 This phase gives the user a way to see whether the archive is strong enough for synthesis.
 
@@ -159,13 +159,14 @@ darchive graph quality --json
 darchive reprocess-plan
 darchive reprocess-plan --json
 darchive reprocess --capture-id <capture-id> --dry-run
+darchive reprocess --capture-id <capture-id>
 darchive related <capture-id>
 darchive related <capture-id> --json
 ```
 
-These commands are local inspection commands. They do not call Codex, create insight notes, send Telegram messages, or rewrite existing archive rows.
+The inspection commands are local and do not call Codex, create insight notes, send Telegram messages, or rewrite existing archive rows. The exception is explicit selected reprocessing: `darchive reprocess --capture-id <capture-id>` calls the processor for one chosen capture, updates the current archive row on success, and preserves previous outputs in archive interpretation history.
 
-`darchive reprocess-plan` is the quality-repair bridge before synthesis. It lists captures whose archive rows are too weak for reliable Viewpoint Layer work, including fallback-processed rows, missing/unknown interests, missing topics, missing key points, missing insight seeds, missing questions, missing relation candidates, low confidence, and `needs_review` rows. `darchive reprocess --dry-run` previews selected candidates only; actual archive rewrites should remain a separate, explicit implementation step.
+`darchive reprocess-plan` is the quality-repair bridge before synthesis. It lists captures whose archive rows are too weak for reliable Viewpoint Layer work, including fallback-processed rows, missing/unknown interests, missing topics, missing key points, missing insight seeds, missing questions, missing relation candidates, low confidence, and `needs_review` rows. `darchive reprocess --dry-run` previews selected candidates only. Actual archive rewrites require one explicit capture id and remain auditable through interpretation history.
 
 ## Deferred work
 
@@ -185,5 +186,6 @@ Those should wait until the archive has enough reliable capture data and the gra
 - The semantic graph remains a generated meaning layer.
 - Codex returns structured JSON only; Python owns validation and writes.
 - Raw text is excluded from normal graph and viewpoint outputs unless explicitly requested.
+- Selected reprocessing must preserve prior interpretations instead of silently erasing them.
 - Every generated relation, theme, or note must preserve evidence item ids.
 - Generated insights start as drafts, not facts.

@@ -79,6 +79,8 @@ def test_archive_item_upsert_and_status(tmp_path):
             "revisit_priority": "high",
             "revisit_reason": "나중에 실행 계획으로 바꿀 수 있음",
             "insight_seed": "읽기 습관과 커리어 성장 연결",
+            "questions": ["어떻게 꾸준히 읽을까?"],
+            "relation_candidates": ["reading system"],
             "dates_mentioned": [],
             "people_mentioned": [],
             "action_candidates": [],
@@ -107,6 +109,12 @@ def test_archive_item_upsert_and_status(tmp_path):
     assert archive["topic"] == "reading habit"
     assert archive["revisit_priority"] == "high"
     assert archive["insight_seed"] == "읽기 습관과 커리어 성장 연결"
+    assert "어떻게 꾸준히 읽을까?" in archive["questions_json"]
+    assert "reading system" in archive["relation_candidates_json"]
+    interpretations = store.archive_interpretations_for_capture(capture_id)
+    assert len(interpretations) == 1
+    assert interpretations[0]["title"] == "읽을 글"
+    assert interpretations[0]["source"] == "unknown"
 
 
 def test_init_db_adds_structured_archive_columns_to_existing_db(tmp_path):
@@ -154,8 +162,115 @@ def test_init_db_adds_structured_archive_columns_to_existing_db(tmp_path):
         "revisit_priority",
         "revisit_reason",
         "insight_seed",
+        "questions_json",
+        "relation_candidates_json",
     } <= columns
-    assert {"insight_notes", "insight_note_items"} <= tables
+    assert {"archive_interpretations", "insight_notes", "insight_note_items"} <= tables
+
+
+def test_init_db_adds_retry_columns_to_existing_captures_table_before_index(tmp_path):
+    store = ArchiveStore(tmp_path / "state")
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(store.path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE captures (
+              id TEXT PRIMARY KEY,
+              capture_key TEXT NOT NULL UNIQUE,
+              chat_id TEXT NOT NULL,
+              message_id INTEGER NOT NULL,
+              chat_type TEXT,
+              chat_title TEXT,
+              sender_user_id TEXT,
+              sender_name TEXT,
+              message_date INTEGER,
+              message_datetime TEXT,
+              text TEXT,
+              caption TEXT,
+              content_kind TEXT NOT NULL,
+              raw_message_json TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'pending',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+    store.init_db()
+
+    with store.connect() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(captures)")}
+        indexes = {row["name"] for row in conn.execute("PRAGMA index_list(captures)")}
+    assert {"retry_count", "next_retry_at", "last_error"} <= columns
+    assert "idx_captures_retry" in indexes
+
+
+def test_pending_captures_respect_retry_backoff_and_blocked_status(tmp_path):
+    store = ArchiveStore(tmp_path / "state")
+    capture_id = store.add_capture(
+        capture_key="chat:retry",
+        chat_id="chat",
+        message_id=100,
+        chat_type="private",
+        chat_title="me",
+        sender_user_id="42",
+        sender_name="User",
+        message_date=None,
+        text="retry me",
+        caption="",
+        content_kind="text",
+        raw_message={"message_id": 100},
+    )
+
+    first_failure = store.mark_capture_failed(capture_id, error="temporary codex failure", max_attempts=3)
+
+    assert first_failure["status"] == "failed_retryable"
+    assert first_failure["retry_count"] == 1
+    assert first_failure["next_retry_at"]
+    assert store.pending_captures(10) == []
+
+    with store.connect() as conn:
+        conn.execute("UPDATE captures SET next_retry_at = '2000-01-01T00:00:00+00:00' WHERE id = ?", (capture_id,))
+    assert [row["id"] for row in store.pending_captures(10)] == [capture_id]
+
+    store.mark_capture_failed(capture_id, error="temporary codex failure", max_attempts=3)
+    blocked = store.mark_capture_failed(capture_id, error="still failing", max_attempts=3)
+
+    row = store.get_capture(capture_id)
+    assert row is not None
+    assert blocked["status"] == "failed_blocked"
+    assert row["status"] == "failed_blocked"
+    assert row["retry_count"] == 3
+    assert row["last_error"] == "still failing"
+    assert store.pending_captures(10) == []
+
+
+def test_mark_capture_processed_resets_retry_state(tmp_path):
+    store = ArchiveStore(tmp_path / "state")
+    capture_id = store.add_capture(
+        capture_key="chat:retry-reset",
+        chat_id="chat",
+        message_id=101,
+        chat_type="private",
+        chat_title="me",
+        sender_user_id="42",
+        sender_name="User",
+        message_date=None,
+        text="retry reset",
+        caption="",
+        content_kind="text",
+        raw_message={"message_id": 101},
+    )
+    store.mark_capture_failed(capture_id, error="temporary codex failure")
+
+    store.mark_capture_processed(capture_id)
+
+    row = store.get_capture(capture_id)
+    assert row is not None
+    assert row["status"] == "processed"
+    assert row["retry_count"] == 0
+    assert row["next_retry_at"] == ""
+    assert row["last_error"] == ""
 
 
 def test_list_capture_summaries_filters_by_primary_or_secondary_interest(tmp_path):

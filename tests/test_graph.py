@@ -74,6 +74,52 @@ def test_export_graph_writes_jsonld_from_archive_items(tmp_path):
     assert any(node["@type"] == "darch:Claim" for node in graph)
 
 
+def test_export_graph_includes_normalized_questions_and_relation_candidates(tmp_path):
+    store = ArchiveStore(tmp_path / "state")
+    capture_id = store.add_capture(
+        capture_key="chat:question",
+        chat_id="chat",
+        message_id=3,
+        chat_type="private",
+        chat_title="me",
+        sender_user_id="42",
+        sender_name="User",
+        message_date=None,
+        text="question capture",
+        caption="",
+        content_kind="text",
+        raw_message={"message_id": 3},
+    )
+    store.upsert_archive_item(
+        capture_id,
+        {
+            "title": "Question item",
+            "core_summary": "Question summary",
+            "raw_extracted_text": "question capture",
+            "source_language": "en",
+            "primary_interest": "AI",
+            "questions": ["What question is forming?"],
+            "relation_candidates": ["connect to archive design"],
+            "confidence": 0.8,
+            "needs_review": False,
+        },
+    )
+    output_path = tmp_path / ".local" / "graph" / "darchivebot.jsonld"
+
+    export_graph(store, output_path)
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    graph = payload["@graph"]
+    archive_node = next(node for node in graph if node["@type"] == "darch:ArchiveItem")
+    assert archive_node["asksQuestion"]
+    assert archive_node["hasRelationCandidate"]
+    assert any(node["@type"] == "darch:Question" and node["title"] == "What question is forming?" for node in graph)
+    assert any(
+        node["@type"] == "darch:RelationCandidate" and node["title"] == "connect to archive design"
+        for node in graph
+    )
+
+
 def test_export_graph_can_include_raw_text_explicitly(tmp_path):
     store = ArchiveStore(tmp_path / "state")
     capture_id = store.add_capture(

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,9 @@ CREATE TABLE IF NOT EXISTS captures (
   content_kind TEXT NOT NULL,
   raw_message_json TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  next_retry_at TEXT,
+  last_error TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -80,6 +84,8 @@ CREATE TABLE IF NOT EXISTS archive_items (
   revisit_priority TEXT,
   revisit_reason TEXT,
   insight_seed TEXT,
+  questions_json TEXT NOT NULL DEFAULT '[]',
+  relation_candidates_json TEXT NOT NULL DEFAULT '[]',
   dates_mentioned_json TEXT NOT NULL,
   people_mentioned_json TEXT NOT NULL,
   action_candidates_json TEXT NOT NULL,
@@ -100,6 +106,21 @@ CREATE TABLE IF NOT EXISTS processing_runs (
   error TEXT,
   started_at TEXT NOT NULL,
   finished_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS archive_interpretations (
+  id TEXT PRIMARY KEY,
+  capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+  archive_item_id TEXT NOT NULL REFERENCES archive_items(id) ON DELETE CASCADE,
+  source TEXT NOT NULL,
+  schema_version TEXT,
+  prompt_version TEXT,
+  title TEXT NOT NULL,
+  core_summary TEXT,
+  confidence REAL NOT NULL,
+  needs_review INTEGER NOT NULL,
+  raw_item_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS insight_notes (
@@ -136,9 +157,14 @@ CREATE TABLE IF NOT EXISTS insight_note_items (
 CREATE INDEX IF NOT EXISTS idx_captures_status_created ON captures(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_capture_files_capture_id ON capture_files(capture_id);
 CREATE INDEX IF NOT EXISTS idx_processing_runs_capture_id ON processing_runs(capture_id);
+CREATE INDEX IF NOT EXISTS idx_archive_interpretations_capture_id ON archive_interpretations(capture_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_insight_notes_period ON insight_notes(period_type, period_start, period_end);
 CREATE INDEX IF NOT EXISTS idx_insight_note_items_archive_item_id ON insight_note_items(archive_item_id);
 """
+
+
+MAX_PROCESSING_RETRY_ATTEMPTS = 5
+RETRY_BACKOFF_MINUTES = (5, 15, 60, 360)
 
 
 @dataclass(frozen=True)
@@ -281,11 +307,15 @@ class ArchiveStore:
                 conn.execute(
                     """
                     SELECT * FROM captures
-                    WHERE status IN ('pending', 'failed_retryable')
+                    WHERE status = 'pending'
+                       OR (
+                         status = 'failed_retryable'
+                         AND (next_retry_at IS NULL OR next_retry_at = '' OR next_retry_at <= ?)
+                       )
                     ORDER BY created_at ASC
                     LIMIT ?
                     """,
-                    (limit,),
+                    (utc_now(), limit),
                 )
             )
 
@@ -513,6 +543,50 @@ class ArchiveStore:
                 (status, utc_now(), capture_id),
             )
 
+    def mark_capture_processed(self, capture_id: str) -> None:
+        self.init_db()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE captures
+                SET status = 'processed', retry_count = 0, next_retry_at = '', last_error = '', updated_at = ?
+                WHERE id = ?
+                """,
+                (utc_now(), capture_id),
+            )
+
+    def mark_capture_failed(
+        self,
+        capture_id: str,
+        *,
+        error: str,
+        max_attempts: int = MAX_PROCESSING_RETRY_ATTEMPTS,
+    ) -> dict[str, Any]:
+        self.init_db()
+        now = datetime.now(timezone.utc)
+        error_text = str(error)[:4000]
+        with self.connect() as conn:
+            row = conn.execute("SELECT retry_count FROM captures WHERE id = ?", (capture_id,)).fetchone()
+            previous_count = int(row["retry_count"] or 0) if row is not None else 0
+            retry_count = previous_count + 1
+            blocked = retry_count >= max_attempts
+            status = "failed_blocked" if blocked else "failed_retryable"
+            next_retry_at = "" if blocked else (now + retry_delay_for_attempt(retry_count)).isoformat(timespec="seconds")
+            conn.execute(
+                """
+                UPDATE captures
+                SET status = ?, retry_count = ?, next_retry_at = ?, last_error = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (status, retry_count, next_retry_at, error_text, now.isoformat(timespec="seconds"), capture_id),
+            )
+        return {
+            "status": status,
+            "retry_count": retry_count,
+            "next_retry_at": next_retry_at,
+            "blocked": blocked,
+        }
+
     def upsert_extracted_text(
         self,
         *,
@@ -536,7 +610,15 @@ class ArchiveStore:
                 (str(uuid.uuid4()), capture_id, source, text, dumps(metadata or {}), now, now),
             )
 
-    def upsert_archive_item(self, capture_id: str, item: dict[str, Any]) -> None:
+    def upsert_archive_item(
+        self,
+        capture_id: str,
+        item: dict[str, Any],
+        *,
+        source: str = "",
+        schema_version: str = "",
+        prompt_version: str = "",
+    ) -> None:
         self.init_db()
         now = utc_now()
         title = str(item.get("title") or "").strip() or "Untitled capture"
@@ -556,6 +638,8 @@ class ArchiveStore:
         revisit_priority = str(item.get("revisit_priority") or "medium").strip().lower() or "medium"
         revisit_reason = str(item.get("revisit_reason") or "").strip()
         insight_seed = str(item.get("insight_seed") or "").strip()
+        questions = list_value(item.get("questions"))
+        relation_candidates = list_value(item.get("relation_candidates"))
         confidence = float(item.get("confidence") or 0.0)
         needs_review = 1 if bool(item.get("needs_review")) else 0
         with self.connect() as conn:
@@ -566,11 +650,12 @@ class ArchiveStore:
                   context, extracted_text, raw_extracted_text, why_saved, source_language,
                   tags_json, primary_interest, secondary_interests_json, topic, subtopic,
                   classification_reason, revisit_priority, revisit_reason, insight_seed,
+                  questions_json, relation_candidates_json,
                   dates_mentioned_json, people_mentioned_json,
                   action_candidates_json, confidence, needs_review, raw_codex_json,
                   created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(capture_id) DO UPDATE SET
                   title = excluded.title,
                   summary = excluded.summary,
@@ -590,6 +675,8 @@ class ArchiveStore:
                   revisit_priority = excluded.revisit_priority,
                   revisit_reason = excluded.revisit_reason,
                   insight_seed = excluded.insight_seed,
+                  questions_json = excluded.questions_json,
+                  relation_candidates_json = excluded.relation_candidates_json,
                   dates_mentioned_json = excluded.dates_mentioned_json,
                   people_mentioned_json = excluded.people_mentioned_json,
                   action_candidates_json = excluded.action_candidates_json,
@@ -619,6 +706,8 @@ class ArchiveStore:
                     revisit_priority,
                     revisit_reason,
                     insight_seed,
+                    dumps(questions),
+                    dumps(relation_candidates),
                     dumps(list_value(item.get("dates_mentioned"))),
                     dumps(list_value(item.get("people_mentioned"))),
                     dumps(list_value(item.get("action_candidates"))),
@@ -628,6 +717,46 @@ class ArchiveStore:
                     now,
                     now,
                 ),
+            )
+            archive_row = conn.execute("SELECT id FROM archive_items WHERE capture_id = ?", (capture_id,)).fetchone()
+            if archive_row is None:
+                raise RuntimeError("failed to insert or load archive item")
+            conn.execute(
+                """
+                INSERT INTO archive_interpretations(
+                  id, capture_id, archive_item_id, source, schema_version, prompt_version,
+                  title, core_summary, confidence, needs_review, raw_item_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    capture_id,
+                    str(archive_row["id"]),
+                    str(source or item.get("processor") or "unknown"),
+                    str(schema_version or item.get("schema_version") or ""),
+                    str(prompt_version or item.get("prompt_version") or ""),
+                    title,
+                    core_summary,
+                    confidence,
+                    needs_review,
+                    dumps(item),
+                    now,
+                ),
+            )
+
+    def archive_interpretations_for_capture(self, capture_id: str) -> list[sqlite3.Row]:
+        self.init_db()
+        with self.connect() as conn:
+            return list(
+                conn.execute(
+                    """
+                    SELECT * FROM archive_interpretations
+                    WHERE capture_id = ?
+                    ORDER BY created_at ASC, rowid ASC
+                    """,
+                    (capture_id,),
+                )
             )
 
     def start_processing_run(
@@ -673,6 +802,11 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def retry_delay_for_attempt(attempt: int) -> timedelta:
+    index = max(0, min(attempt - 1, len(RETRY_BACKOFF_MINUTES) - 1))
+    return timedelta(minutes=RETRY_BACKOFF_MINUTES[index])
+
+
 def unix_to_iso(value: int | None) -> str:
     if value is None:
         return ""
@@ -689,9 +823,30 @@ def json_array(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def json_list(value: Any) -> list[str]:
+    try:
+        payload = json.loads(str(value or "[]"))
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [str(item).strip() for item in payload if str(item).strip()]
+
+
+def raw_json_list(raw: Any, key: str) -> list[str]:
+    try:
+        payload = json.loads(str(raw or "{}"))
+    except json.JSONDecodeError:
+        return []
+    value = payload.get(key)
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
 def migrate_db(conn: sqlite3.Connection) -> None:
-    columns = {row["name"] for row in conn.execute("PRAGMA table_info(archive_items)")}
-    additions = {
+    archive_columns = {row["name"] for row in conn.execute("PRAGMA table_info(archive_items)")}
+    archive_additions = {
         "core_summary": "TEXT",
         "key_points_json": "TEXT",
         "context": "TEXT",
@@ -705,11 +860,51 @@ def migrate_db(conn: sqlite3.Connection) -> None:
         "revisit_priority": "TEXT",
         "revisit_reason": "TEXT",
         "insight_seed": "TEXT",
+        "questions_json": "TEXT NOT NULL DEFAULT '[]'",
+        "relation_candidates_json": "TEXT NOT NULL DEFAULT '[]'",
     }
-    for column, column_type in additions.items():
-        if column not in columns:
+    for column, column_type in archive_additions.items():
+        if column not in archive_columns:
             try:
                 conn.execute(f"ALTER TABLE archive_items ADD COLUMN {column} {column_type}")
             except sqlite3.OperationalError as exc:
                 if "duplicate column name" not in str(exc).lower():
                     raise
+
+    capture_columns = {row["name"] for row in conn.execute("PRAGMA table_info(captures)")}
+    capture_additions = {
+        "retry_count": "INTEGER NOT NULL DEFAULT 0",
+        "next_retry_at": "TEXT",
+        "last_error": "TEXT",
+    }
+    for column, column_type in capture_additions.items():
+        if column not in capture_columns:
+            try:
+                conn.execute(f"ALTER TABLE captures ADD COLUMN {column} {column_type}")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_captures_retry ON captures(status, next_retry_at, created_at)")
+    backfill_archive_semantic_json(conn)
+
+
+def backfill_archive_semantic_json(conn: sqlite3.Connection) -> None:
+    rows = list(conn.execute("SELECT id, raw_codex_json, questions_json, relation_candidates_json FROM archive_items"))
+    for row in rows:
+        questions = json_list(row["questions_json"])
+        relation_candidates = json_list(row["relation_candidates_json"])
+        updates: dict[str, str] = {}
+        if not questions:
+            raw_questions = raw_json_list(row["raw_codex_json"], "questions")
+            if raw_questions:
+                updates["questions_json"] = dumps(raw_questions)
+        if not relation_candidates:
+            raw_relations = raw_json_list(row["raw_codex_json"], "relation_candidates")
+            if raw_relations:
+                updates["relation_candidates_json"] = dumps(raw_relations)
+        if updates:
+            assignments = ", ".join(f"{key} = ?" for key in updates)
+            conn.execute(
+                f"UPDATE archive_items SET {assignments} WHERE id = ?",
+                (*updates.values(), row["id"]),
+            )

@@ -21,6 +21,10 @@ Do not switch raw capture storage away from SQLite. The graph store should be re
 
 raw extracted text is not exported or stored in the semantic graph by default. Use `darchive graph sync --include-raw-text` or `darchive graph export --include-raw-text` only when local analysis needs the full OCR/message text in graph output.
 
+Questions and relation candidates are stored as normalized archive fields and exported into the graph from those fields. Older rows can still fall back to `raw_codex_json`, but new processing should not require graph/readiness code to parse raw Codex output as the only source.
+
+Reprocessing updates the current `archive_items` view only after validation. Each successful interpretation is also recorded in `archive_interpretations`, so graph facts can be regenerated from the current view while prior interpretations remain auditable.
+
 ## Ontology classes
 
 Core classes:

@@ -25,8 +25,12 @@ ISSUE_SPECS = [
     ("needs_review", "needs review", lambda row: bool(row["needs_review"])),
     ("low_confidence", "low confidence", lambda row: confidence(row) < 0.5),
     ("fallback_processed", "fallback processed", lambda row: is_fallback_processed(row)),
-    ("missing_questions", "missing questions", lambda row: not raw_json_list(row, "questions")),
-    ("missing_relation_candidates", "missing relation candidates", lambda row: not raw_json_list(row, "relation_candidates")),
+    ("missing_questions", "missing questions", lambda row: not semantic_json_list(row, "questions_json", "questions")),
+    (
+        "missing_relation_candidates",
+        "missing relation candidates",
+        lambda row: not semantic_json_list(row, "relation_candidates_json", "relation_candidates"),
+    ),
 ]
 ISSUE_NAMES = [name for name, _label, _predicate in ISSUE_SPECS]
 
@@ -203,8 +207,8 @@ def related_match(source: Any, candidate: Any) -> dict[str, Any]:
     if shared_concepts:
         score += len(shared_concepts)
         reasons.append(f"shared concepts: {', '.join(shared_concepts)}")
-    source_relation_candidates = set(raw_json_list(source, "relation_candidates"))
-    candidate_relation_candidates = set(raw_json_list(candidate, "relation_candidates"))
+    source_relation_candidates = set(semantic_json_list(source, "relation_candidates_json", "relation_candidates"))
+    candidate_relation_candidates = set(semantic_json_list(candidate, "relation_candidates_json", "relation_candidates"))
     shared_relation_candidates = sorted(source_relation_candidates & candidate_relation_candidates)
     if shared_relation_candidates:
         score += 2 * len(shared_relation_candidates)
@@ -261,6 +265,14 @@ def raw_json_list(row: Any, key: str) -> list[str]:
     if not isinstance(value, list):
         return []
     return [clean(item) for item in value if clean(item)]
+
+
+def semantic_json_list(row: Any, column: str, raw_key: str) -> list[str]:
+    if column in row.keys():
+        normalized = json_list(row[column])
+        if normalized:
+            return normalized
+    return raw_json_list(row, raw_key)
 
 
 def json_list(value: Any) -> list[str]:

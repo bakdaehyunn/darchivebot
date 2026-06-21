@@ -141,8 +141,8 @@ def quads_for_archive_row(row: Any, *, include_raw_text: bool = False) -> Iterab
     key_points = json_list(row["key_points_json"])
     tags = json_list(row["tags_json"])
     secondary_interests = json_list(row["secondary_interests_json"])
-    questions = raw_json_list(row, "questions")
-    relation_candidates = raw_json_list(row, "relation_candidates")
+    questions = semantic_json_list(row, "questions_json", "questions")
+    relation_candidates = semantic_json_list(row, "relation_candidates_json", "relation_candidates")
     primary_interest = str(row["primary_interest"] or "").strip()
     topic = str(row["topic"] or "").strip()
     subtopic = str(row["subtopic"] or "").strip()
@@ -320,6 +320,14 @@ def raw_json_list(row: Any, key: str) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def semantic_json_list(row: Any, column: str, raw_key: str) -> list[str]:
+    if column in row.keys():
+        normalized = json_list(row[column])
+        if normalized:
+            return normalized
+    return raw_json_list(row, raw_key)
 
 
 def stable_hash(value: str) -> str:

@@ -5,7 +5,13 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from darchivebot.codex_harness import CodexHarness, CodexRunError, validate_codex_item
+from darchivebot.codex_harness import (
+    CAPTURE_PROMPT_VERSION,
+    CAPTURE_SCHEMA_VERSION,
+    CodexHarness,
+    CodexRunError,
+    validate_codex_item,
+)
 from darchivebot.config import Settings
 from darchivebot.ocr import OcrAdapter, TesseractOcrAdapter
 from darchivebot.state import file_lock
@@ -151,8 +157,15 @@ class CaptureProcessor:
                 item = validate_codex_item(item, capture_id)
             else:
                 item = self.basic_extract(packet, files)
-            self.write_item(capture_id, item, source="codex" if codex_enabled else "basic")
-            self.store.mark_capture_status(capture_id, "processed")
+            source = "codex" if codex_enabled else "basic"
+            self.write_item(
+                capture_id,
+                item,
+                source=source,
+                schema_version=CAPTURE_SCHEMA_VERSION if codex_enabled else "basic-fallback-v1",
+                prompt_version=CAPTURE_PROMPT_VERSION if codex_enabled else "basic-fallback-v1",
+            )
+            self.store.mark_capture_processed(capture_id)
             self.store.finish_processing_run(run_id=run_id, status="processed")
             elapsed_sec = time.monotonic() - started
             result = {
@@ -166,8 +179,9 @@ class CaptureProcessor:
                 progress({"event": "finish", **result})
             return result
         except (CodexRunError, ValueError, OSError, RuntimeError) as exc:
+            retry_state = None
             if not preserve_status_on_failure:
-                self.store.mark_capture_status(capture_id, "failed_retryable")
+                retry_state = self.store.mark_capture_failed(capture_id, error=str(exc))
             self.store.finish_processing_run(run_id=run_id, status="failed", error=str(exc)[:4000])
             elapsed_sec = time.monotonic() - started
             result = {
@@ -178,6 +192,14 @@ class CaptureProcessor:
                 "elapsed_sec": round(elapsed_sec, 2),
                 "error": str(exc),
             }
+            if retry_state is not None:
+                result.update(
+                    {
+                        "capture_status": retry_state["status"],
+                        "retry_count": retry_state["retry_count"],
+                        "next_retry_at": retry_state["next_retry_at"],
+                    }
+                )
             if progress:
                 progress({"event": "failed", **result})
             return result
@@ -214,6 +236,8 @@ class CaptureProcessor:
             "revisit_priority": "medium",
             "revisit_reason": "",
             "insight_seed": "",
+            "questions": [],
+            "relation_candidates": [],
             "dates_mentioned": [],
             "people_mentioned": [],
             "action_candidates": [],
@@ -221,11 +245,25 @@ class CaptureProcessor:
             "needs_review": True,
         }
 
-    def write_item(self, capture_id: str, item: dict[str, Any], source: str) -> None:
+    def write_item(
+        self,
+        capture_id: str,
+        item: dict[str, Any],
+        *,
+        source: str,
+        schema_version: str,
+        prompt_version: str,
+    ) -> None:
         text = str(item.get("raw_extracted_text") or item.get("extracted_text") or "")
         if text:
             self.store.upsert_extracted_text(capture_id=capture_id, source=source, text=text, metadata=item)
-        self.store.upsert_archive_item(capture_id, item)
+        self.store.upsert_archive_item(
+            capture_id,
+            item,
+            source=source,
+            schema_version=schema_version,
+            prompt_version=prompt_version,
+        )
 
 
 def build_capture_packet(capture: Any, files: list[Any]) -> dict[str, Any]:

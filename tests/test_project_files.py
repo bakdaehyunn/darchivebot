@@ -38,6 +38,8 @@ def test_readme_frames_product_as_interest_aware_archive_without_mvp_language():
     assert "Viewpoint Layer" in text
     assert "insight seed" in text
     assert "darchive insights generate --period weekly" in text
+    assert "failed_blocked" in text
+    assert "archive interpretation history" in text
     assert "docs/viewpoint-layer.md" in text
     assert "docs/ontology-graph.md" in text
     assert "MVP" not in text
@@ -53,6 +55,9 @@ def test_viewpoint_layer_docs_define_final_product_layer():
     assert "SQLite remains the operational source of truth" in text
     assert "Raw text is excluded from normal graph and viewpoint outputs" in text
     assert "add `darchive graph quality`" in text
+    assert "darchive reprocess --capture-id <capture-id>" in text
+    assert "interpretation history" in text
+    assert "actual archive rewrites should remain a separate" not in text
 
 
 def test_ontology_graph_docs_define_semantic_store_with_lightweight_jsonld_export():
@@ -66,3 +71,5 @@ def test_ontology_graph_docs_define_semantic_store_with_lightweight_jsonld_expor
     assert "darch:hasInterest" in text
     assert "SQLite remains the source of truth" in text
     assert "raw extracted text is not exported or stored in the semantic graph by default" in text
+    assert "Questions and relation candidates are stored as normalized archive fields" in text
+    assert "archive_interpretations" in text

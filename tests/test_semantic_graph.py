@@ -59,6 +59,34 @@ def test_semantic_store_export_writes_nquads(tmp_path):
     assert "darchivebot.local/graph/semantic" in text
 
 
+def test_semantic_store_prefers_normalized_questions_and_relation_candidates(tmp_path):
+    store = ArchiveStore(tmp_path / "state")
+    capture_id = add_archive_item(store)
+    with store.connect() as conn:
+        conn.execute(
+            """
+            UPDATE archive_items
+            SET raw_codex_json = ?
+            WHERE capture_id = ?
+            """,
+            (
+                '{"questions":["raw stale question"],"relation_candidates":["raw stale relation"]}',
+                capture_id,
+            ),
+        )
+    graph_path = default_semantic_store_path(tmp_path)
+    export_path = default_semantic_export_path(tmp_path)
+
+    sync_semantic_store(store, graph_path)
+    export_semantic_store(graph_path, export_path)
+
+    text = export_path.read_text(encoding="utf-8")
+    assert "How should Codex use this viewpoint later?" in text
+    assert "related to ontology transition" in text
+    assert "raw stale question" not in text
+    assert "raw stale relation" not in text
+
+
 def test_semantic_store_stats_handles_missing_store(tmp_path):
     stats = semantic_store_stats(tmp_path / ".local" / "graph" / "missing-store")
 
