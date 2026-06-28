@@ -160,6 +160,21 @@ CREATE INDEX IF NOT EXISTS idx_processing_runs_capture_id ON processing_runs(cap
 CREATE INDEX IF NOT EXISTS idx_archive_interpretations_capture_id ON archive_interpretations(capture_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_insight_notes_period ON insight_notes(period_type, period_start, period_end);
 CREATE INDEX IF NOT EXISTS idx_insight_note_items_archive_item_id ON insight_note_items(archive_item_id);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS archive_search_fts USING fts5(
+  archive_item_id UNINDEXED,
+  capture_id UNINDEXED,
+  title,
+  summary,
+  extracted_text,
+  tags,
+  interests,
+  topics,
+  questions,
+  insight_seed,
+  source_text,
+  tokenize = 'unicode61'
+);
 """
 
 
@@ -417,6 +432,124 @@ class ArchiveStore:
         with self.connect() as conn:
             return list(conn.execute(sql, params))
 
+    def rebuild_search_index(self) -> dict[str, Any]:
+        self.init_db()
+        with self.connect() as conn:
+            rows = archive_rows_for_search(conn)
+            conn.execute("DELETE FROM archive_search_fts")
+            for row in rows:
+                conn.execute(
+                    """
+                    INSERT INTO archive_search_fts(
+                      archive_item_id, capture_id, title, summary, extracted_text,
+                      tags, interests, topics, questions, insight_seed, source_text
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    search_index_values(row),
+                )
+        return {"indexed_archive_items": len(rows)}
+
+    def search_archive(self, query: str, *, limit: int = 20) -> list[sqlite3.Row]:
+        self.init_db()
+        cleaned_query = query.strip()
+        if not cleaned_query:
+            return []
+        with self.connect() as conn:
+            if archive_search_count(conn) != archive_item_count(conn):
+                rebuild_search_index_conn(conn)
+            return list(
+                conn.execute(
+                    """
+                    SELECT
+                      ai.*,
+                      c.id AS capture_row_id,
+                      c.capture_key,
+                      c.message_id,
+                      c.message_datetime,
+                      c.status AS capture_status,
+                      c.content_kind,
+                      c.text AS capture_text,
+                      c.caption AS capture_caption,
+                      fts.title AS search_title,
+                      fts.summary AS search_summary,
+                      fts.extracted_text AS search_extracted_text,
+                      fts.tags AS search_tags,
+                      fts.interests AS search_interests,
+                      fts.topics AS search_topics,
+                      fts.questions AS search_questions,
+                      fts.insight_seed AS search_insight_seed,
+                      fts.source_text AS search_source_text,
+                      bm25(archive_search_fts) AS search_rank,
+                      snippet(archive_search_fts, -1, '[', ']', '...', 12) AS search_snippet
+                    FROM archive_search_fts fts
+                    JOIN archive_items ai ON ai.id = fts.archive_item_id
+                    JOIN captures c ON c.id = ai.capture_id
+                    WHERE archive_search_fts MATCH ?
+                    ORDER BY search_rank ASC, ai.updated_at DESC, ai.id ASC
+                    LIMIT ?
+                    """,
+                    (cleaned_query, limit),
+                )
+            )
+
+    def review_archive_items(
+        self,
+        *,
+        limit: int = 20,
+        needs_review_only: bool = False,
+        revisit_only: bool = False,
+    ) -> list[sqlite3.Row]:
+        self.init_db()
+        where = ["ai.id IS NOT NULL"]
+        params: list[Any] = []
+        if needs_review_only:
+            where.append("ai.needs_review = 1")
+        if revisit_only:
+            where.append(
+                """
+                (
+                  LOWER(COALESCE(ai.revisit_priority, '')) IN ('urgent', 'high')
+                  OR COALESCE(ai.revisit_reason, '') <> ''
+                  OR COALESCE(ai.insight_seed, '') <> ''
+                )
+                """
+            )
+        params.append(limit)
+        with self.connect() as conn:
+            return list(
+                conn.execute(
+                    f"""
+                    SELECT
+                      ai.*,
+                      c.id AS capture_row_id,
+                      c.capture_key,
+                      c.message_id,
+                      c.message_datetime,
+                      c.status AS capture_status,
+                      c.content_kind,
+                      c.text AS capture_text,
+                      c.caption AS capture_caption
+                    FROM archive_items ai
+                    JOIN captures c ON c.id = ai.capture_id
+                    WHERE {' AND '.join(where)}
+                    ORDER BY
+                      ai.needs_review DESC,
+                      CASE LOWER(COALESCE(ai.revisit_priority, ''))
+                        WHEN 'urgent' THEN 0
+                        WHEN 'high' THEN 1
+                        WHEN 'medium' THEN 2
+                        WHEN 'low' THEN 3
+                        ELSE 4
+                      END ASC,
+                      ai.updated_at DESC,
+                      ai.id ASC
+                    LIMIT ?
+                    """,
+                    tuple(params),
+                )
+            )
+
     def processing_runs_for_capture_ids(self, capture_ids: list[str]) -> dict[str, list[sqlite3.Row]]:
         self.init_db()
         if not capture_ids:
@@ -609,6 +742,9 @@ class ArchiveStore:
                 """,
                 (str(uuid.uuid4()), capture_id, source, text, dumps(metadata or {}), now, now),
             )
+            archive_row = conn.execute("SELECT id FROM archive_items WHERE capture_id = ?", (capture_id,)).fetchone()
+            if archive_row is not None:
+                rebuild_search_index_conn(conn)
 
     def upsert_archive_item(
         self,
@@ -744,6 +880,7 @@ class ArchiveStore:
                     now,
                 ),
             )
+            rebuild_search_index_conn(conn)
 
     def archive_interpretations_for_capture(self, capture_id: str) -> list[sqlite3.Row]:
         self.init_db()
@@ -844,7 +981,117 @@ def raw_json_list(raw: Any, key: str) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
+def archive_rows_for_search(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            """
+            SELECT
+              ai.*,
+              c.text AS capture_text,
+              c.caption AS capture_caption,
+              COALESCE(GROUP_CONCAT(et.text, char(10)), '') AS extracted_text_sources
+            FROM archive_items ai
+            JOIN captures c ON c.id = ai.capture_id
+            LEFT JOIN extracted_texts et ON et.capture_id = ai.capture_id
+            GROUP BY ai.id
+            ORDER BY ai.id ASC
+            """
+        )
+    )
+
+
+def archive_item_count(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("SELECT COUNT(*) FROM archive_items").fetchone()[0])
+
+
+def archive_search_count(conn: sqlite3.Connection) -> int:
+    try:
+        return int(conn.execute("SELECT COUNT(*) FROM archive_search_fts").fetchone()[0])
+    except sqlite3.OperationalError:
+        return -1
+
+
+def rebuild_search_index_conn(conn: sqlite3.Connection) -> None:
+    ensure_search_table(conn)
+    rows = archive_rows_for_search(conn)
+    conn.execute("DELETE FROM archive_search_fts")
+    for row in rows:
+        conn.execute(
+            """
+            INSERT INTO archive_search_fts(
+              archive_item_id, capture_id, title, summary, extracted_text,
+              tags, interests, topics, questions, insight_seed, source_text
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            search_index_values(row),
+        )
+
+
+def ensure_search_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE VIRTUAL TABLE IF NOT EXISTS archive_search_fts USING fts5(
+          archive_item_id UNINDEXED,
+          capture_id UNINDEXED,
+          title,
+          summary,
+          extracted_text,
+          tags,
+          interests,
+          topics,
+          questions,
+          insight_seed,
+          source_text,
+          tokenize = 'unicode61'
+        )
+        """
+    )
+
+
+def search_index_values(row: sqlite3.Row) -> tuple[str, str, str, str, str, str, str, str, str, str, str]:
+    tags = json_list(row["tags_json"])
+    secondary_interests = json_list(row["secondary_interests_json"])
+    questions = json_list(row["questions_json"])
+    key_points = json_list(row["key_points_json"])
+    relation_candidates = json_list(row["relation_candidates_json"])
+    interests = [str(row["primary_interest"] or "").strip(), *secondary_interests]
+    topics = [str(row["topic"] or "").strip(), str(row["subtopic"] or "").strip()]
+    summary_parts = [
+        row["summary"],
+        row["core_summary"],
+        row["why_saved"],
+        row["classification_reason"],
+        row["revisit_reason"],
+        *key_points,
+        *relation_candidates,
+    ]
+    source_parts = [row["capture_text"], row["capture_caption"], row["extracted_text_sources"]]
+    return (
+        str(row["id"]),
+        str(row["capture_id"]),
+        search_text(row["title"]),
+        join_search_text(summary_parts),
+        search_text(row["raw_extracted_text"] or row["extracted_text"]),
+        join_search_text(tags),
+        join_search_text(interests),
+        join_search_text(topics),
+        join_search_text(questions),
+        search_text(row["insight_seed"]),
+        join_search_text(source_parts),
+    )
+
+
+def join_search_text(values: list[Any]) -> str:
+    return " ".join(search_text(value) for value in values if search_text(value))
+
+
+def search_text(value: Any) -> str:
+    return str(value or "").replace("\x00", " ").strip()
+
+
 def migrate_db(conn: sqlite3.Connection) -> None:
+    ensure_search_table(conn)
     archive_columns = {row["name"] for row in conn.execute("PRAGMA table_info(archive_items)")}
     archive_additions = {
         "core_summary": "TEXT",
@@ -886,6 +1133,8 @@ def migrate_db(conn: sqlite3.Connection) -> None:
                     raise
     conn.execute("CREATE INDEX IF NOT EXISTS idx_captures_retry ON captures(status, next_retry_at, created_at)")
     backfill_archive_semantic_json(conn)
+    if archive_search_count(conn) != archive_item_count(conn):
+        rebuild_search_index_conn(conn)
 
 
 def backfill_archive_semantic_json(conn: sqlite3.Connection) -> None:

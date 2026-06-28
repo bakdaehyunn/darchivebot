@@ -47,6 +47,9 @@ Capture Layer
 Archive Layer
   -> SQLite에 저장된 캡처, 파일, 정리 결과, 처리 상태
 
+Search Layer
+  -> SQLite FTS5로 만든 로컬 검색 색인, 리뷰 큐, 재방문 큐, 로컬 웹 UI
+
 Semantic Graph Layer
   -> 관심사, 주제, 개념, 주장, 질문, 연결 후보
 
@@ -119,6 +122,9 @@ darchive telegram
 darchive list
 darchive pending
 darchive process
+darchive search "검색어"
+darchive review
+darchive web
 ```
 
 ## 주요 명령어
@@ -146,6 +152,12 @@ darchive graph store-export
 darchive graph export
 darchive graph stats
 darchive graph quality
+darchive search <query>
+darchive search <query> --rebuild
+darchive review
+darchive review --needs-review
+darchive review --revisit
+darchive web
 darchive interests
 darchive concepts
 darchive related <capture-id>
@@ -163,6 +175,12 @@ darchive send-test --chat-id <telegram-chat-id>
 - `pending`: 아직 정리되지 않은 항목과 처리 계획을 미리 봅니다.
 - `process`: 새 항목이 있을 때만 내용을 정리하고 로컬 DB에 저장합니다.
 - `process --export-graph`: 새 항목이 정리되면 RDF semantic store와 lightweight JSON-LD export를 함께 새로 만듭니다.
+- `search`: SQLite FTS5 로컬 색인으로 저장된 아카이브를 검색하고 어떤 필드가 매칭됐는지 보여줍니다.
+- `search --rebuild`: 검증된 archive row에서 검색 색인을 결정적으로 다시 만듭니다.
+- `review`: 다시 확인하거나 나중에 꺼내볼 아카이브 항목을 로컬 큐로 보여줍니다.
+- `review --needs-review`: Codex 정리 신뢰도가 낮거나 사람이 확인해야 하는 항목만 봅니다.
+- `review --revisit`: 재방문 우선순위, 재방문 이유, insight seed가 있는 항목을 봅니다.
+- `web`: `127.0.0.1`에만 바인딩되는 로컬 웹 UI를 열어 목록, 검색, 리뷰, 상세, 관련 항목, insight note를 확인합니다.
 - `reprocess-plan`: 이미 정리된 항목 중 분류가 약하거나 fallback으로 처리된 항목을 찾아, 왜 다시 정리할 후보인지 보여줍니다.
 - `reprocess-plan --json`: 후보 목록을 자동화나 점검에 쓰기 좋은 JSON으로 출력합니다.
 - `reprocess --capture-id <capture-id> --dry-run`: 선택한 항목을 다시 정리한다면 무엇을 대상으로 할지 미리 봅니다. SQLite row는 바꾸지 않습니다.
@@ -223,6 +241,8 @@ DARCHIVE_CODEX_TIMEOUT_SEC=900
 ## 앞으로 더해질 수 있는 것
 
 다카이브봇은 먼저 캡처와 글을 안정적으로 모으고 관심사별로 정리하는 개인 아카이브로 시작합니다. 이후에는 Viewpoint Layer로 확장해 저장된 항목 사이의 관련성, 반복되는 관심사, 주간/월간 인사이트, Codex 논의 맥락, Telegram으로 다시 꺼내보기 같은 기능을 붙일 수 있습니다.
+
+현재 남아 있는 사용성 갭은 명확합니다. 검색과 리뷰 큐는 로컬에서 쓸 수 있지만, 리뷰 상태를 웹 UI에서 직접 변경하는 기능은 아직 없습니다. 검색은 SQLite FTS5 기반이며 vector search나 embedding retrieval은 일부러 넣지 않았습니다. 주간 insight note를 Telegram으로 다시 보내는 기능, 브라우저 확장, 자동 중복 병합도 다음 단계 후보입니다.
 
 Viewpoint Layer 방향은 [docs/viewpoint-layer.md](docs/viewpoint-layer.md)에 따로 정리합니다.
 Insight synthesis 방향은 [docs/insight-synthesis.md](docs/insight-synthesis.md)에 따로 정리합니다.

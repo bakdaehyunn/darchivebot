@@ -20,6 +20,7 @@ from darchivebot.readiness import (
     related_captures,
     reprocess_plan,
 )
+from darchivebot.search import rebuild_search_index, review_queue, search_archive
 from darchivebot.semantic_graph import (
     default_semantic_export_path,
     default_semantic_store_path,
@@ -39,6 +40,7 @@ from darchivebot.telegram import (
     format_rooms_report,
     read_room_state,
 )
+from darchivebot.web import serve_local_web
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -120,6 +122,22 @@ def main(argv: list[str] | None = None) -> int:
     p_list.add_argument("--limit", type=int, default=20)
     p_list.add_argument("--interest", help="Only show archived captures matching an interest")
     p_list.add_argument("--json", action="store_true")
+
+    p_search = sub.add_parser("search", help="Search archived captures with the local SQLite FTS index")
+    p_search.add_argument("query")
+    p_search.add_argument("--limit", type=int, default=20)
+    p_search.add_argument("--rebuild", action="store_true", help="Rebuild the generated FTS index before searching")
+    p_search.add_argument("--json", action="store_true")
+
+    p_review = sub.add_parser("review", help="List local archive items that need review or revisit")
+    p_review.add_argument("--limit", type=int, default=20)
+    p_review.add_argument("--needs-review", action="store_true")
+    p_review.add_argument("--revisit", action="store_true")
+    p_review.add_argument("--json", action="store_true")
+
+    p_web = sub.add_parser("web", help="Run the local-only archive retrieval web UI")
+    p_web.add_argument("--host", default="127.0.0.1")
+    p_web.add_argument("--port", type=int, default=8765)
 
     p_interests = sub.add_parser("interests", help="Inspect archive interest distribution")
     p_interests.add_argument("--limit", type=int, default=20)
@@ -284,6 +302,24 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.cmd == "list":
         return list_cmd(store, limit=args.limit, interest=args.interest or "", json_output=args.json)
+    if args.cmd == "search":
+        return search_cmd(
+            store,
+            query=args.query,
+            limit=args.limit,
+            rebuild=args.rebuild,
+            json_output=args.json,
+        )
+    if args.cmd == "review":
+        return review_cmd(
+            store,
+            limit=args.limit,
+            needs_review_only=args.needs_review,
+            revisit_only=args.revisit,
+            json_output=args.json,
+        )
+    if args.cmd == "web":
+        return web_cmd(store, host=args.host, port=args.port)
     if args.cmd == "interests":
         return interests_cmd(store, limit=args.limit, json_output=args.json)
     if args.cmd == "concepts":
@@ -512,6 +548,80 @@ def list_cmd(store: ArchiveStore, limit: int, interest: str, json_output: bool) 
             f"{row['id']}\t{row['status']}\t{row['content_kind']}\t"
             f"files={file_status}\tarchive={archive_status}{classification}\t{preview[:100]}"
         )
+    return 0
+
+
+def search_cmd(store: ArchiveStore, *, query: str, limit: int, rebuild: bool, json_output: bool) -> int:
+    rebuild_result = rebuild_search_index(store) if rebuild else None
+    result = search_archive(store, query, limit=limit)
+    if json_output:
+        payload: dict[str, Any] = dict(result)
+        if rebuild_result is not None:
+            payload["index"] = rebuild_result
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    if rebuild_result is not None:
+        print(f"search index rebuilt archive_items={rebuild_result['indexed_archive_items']}")
+    if not result["results"]:
+        print(f"no search results for: {query}")
+        return 0
+    print(f"query={query} results={result['count']}")
+    for item in result["results"]:
+        label = format_search_label(item)
+        snippet = item.get("snippet") or item.get("summary") or ""
+        print(f"{item['capture_id']}\t{label}\t{item['title']}")
+        print(f"  why: {item['match_explanation']}")
+        if snippet:
+            print(f"  snippet: {snippet[:240]}")
+    return 0
+
+
+def review_cmd(
+    store: ArchiveStore,
+    *,
+    limit: int,
+    needs_review_only: bool,
+    revisit_only: bool,
+    json_output: bool,
+) -> int:
+    result = review_queue(
+        store,
+        limit=limit,
+        needs_review_only=needs_review_only,
+        revisit_only=revisit_only,
+    )
+    if json_output:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    if not result["items"]:
+        print(f"no review items mode={result['mode']}")
+        return 0
+    print(f"mode={result['mode']} items={result['count']}")
+    for item in result["items"]:
+        flags = []
+        if item["needs_review"]:
+            flags.append("needs_review")
+        if item["revisit_priority"]:
+            flags.append(f"revisit={item['revisit_priority']}")
+        label = " ".join(flags) or "review"
+        topic = format_classification_preview(item["primary_interest"], item["topic"]).strip()
+        print(f"{item['capture_id']}\t{label}\t{topic}\t{item['title']}")
+        if item["revisit_reason"]:
+            print(f"  revisit_reason: {item['revisit_reason']}")
+        if item["insight_seed"]:
+            print(f"  insight_seed: {item['insight_seed']}")
+    return 0
+
+
+def web_cmd(store: ArchiveStore, *, host: str, port: int) -> int:
+    try:
+        serve_local_web(store, host=host, port=port)
+    except KeyboardInterrupt:
+        print("\ndarchive local web UI stopped")
+        return 0
+    except ValueError as exc:
+        print(f"[FAIL] {exc}")
+        return 2
     return 0
 
 
@@ -957,6 +1067,19 @@ def format_classification_preview(primary_interest: str, topic: str) -> str:
     if topic:
         parts.append(f"topic={topic}")
     return "\t" + " ".join(parts) if parts else ""
+
+
+def format_search_label(item: dict[str, Any]) -> str:
+    parts = []
+    if item.get("primary_interest"):
+        parts.append(f"interest={item['primary_interest']}")
+    if item.get("topic"):
+        parts.append(f"topic={item['topic']}")
+    if item.get("needs_review"):
+        parts.append("needs_review")
+    if item.get("revisit_priority"):
+        parts.append(f"revisit={item['revisit_priority']}")
+    return " ".join(parts) if parts else "archived"
 
 
 def format_process_and_graph_results(

@@ -117,6 +117,158 @@ def test_archive_item_upsert_and_status(tmp_path):
     assert interpretations[0]["source"] == "unknown"
 
 
+def test_search_index_rebuild_is_deterministic_and_searchable(tmp_path):
+    store = ArchiveStore(tmp_path / "state")
+    capture_id = store.add_capture(
+        capture_key="chat:search",
+        chat_id="chat",
+        message_id=22,
+        chat_type="private",
+        chat_title="me",
+        sender_user_id="42",
+        sender_name="User",
+        message_date=None,
+        text="semantic archive capture",
+        caption="",
+        content_kind="text",
+        raw_message={"message_id": 22},
+    )
+    store.upsert_archive_item(
+        capture_id,
+        {
+            "title": "Semantic archive design",
+            "core_summary": "FTS search should find reusable archive notes",
+            "key_points": ["local retrieval matters"],
+            "raw_extracted_text": "A local-first archive needs full text retrieval.",
+            "source_language": "en",
+            "tags": ["search", "archive"],
+            "primary_interest": "AI",
+            "secondary_interests": ["product"],
+            "topic": "retrieval",
+            "questions": ["How do I find this later?"],
+            "insight_seed": "Search layer before viewpoint layer",
+            "confidence": 0.9,
+            "needs_review": False,
+        },
+    )
+
+    first = store.rebuild_search_index()
+    second = store.rebuild_search_index()
+    rows = store.search_archive('"retrieval"', limit=10)
+
+    assert first == second == {"indexed_archive_items": 1}
+    assert len(rows) == 1
+    assert rows[0]["capture_id"] == capture_id
+    assert "retrieval" in rows[0]["search_topics"]
+
+
+def test_search_index_refreshes_when_extracted_text_changes_after_archive_item(tmp_path):
+    store = ArchiveStore(tmp_path / "state")
+    capture_id = store.add_capture(
+        capture_key="chat:search-refresh",
+        chat_id="chat",
+        message_id=25,
+        chat_type="private",
+        chat_title="me",
+        sender_user_id="42",
+        sender_name="User",
+        message_date=None,
+        text="initial",
+        caption="",
+        content_kind="text",
+        raw_message={"message_id": 25},
+    )
+    store.upsert_archive_item(
+        capture_id,
+        {
+            "title": "Archive item",
+            "core_summary": "Search refresh",
+            "raw_extracted_text": "initial text",
+            "source_language": "en",
+            "primary_interest": "AI",
+            "topic": "search",
+            "confidence": 0.9,
+            "needs_review": False,
+        },
+    )
+
+    assert store.search_archive('"latekeyword"', limit=10) == []
+
+    store.upsert_extracted_text(capture_id=capture_id, source="ocr", text="latekeyword from updated OCR")
+
+    rows = store.search_archive('"latekeyword"', limit=10)
+    assert len(rows) == 1
+    assert rows[0]["capture_id"] == capture_id
+    assert "latekeyword" in rows[0]["search_source_text"]
+
+
+def test_review_archive_items_filters_needs_review_and_revisit(tmp_path):
+    store = ArchiveStore(tmp_path / "state")
+    review_id = store.add_capture(
+        capture_key="chat:review",
+        chat_id="chat",
+        message_id=23,
+        chat_type="private",
+        chat_title="me",
+        sender_user_id="42",
+        sender_name="User",
+        message_date=None,
+        text="needs review",
+        caption="",
+        content_kind="text",
+        raw_message={"message_id": 23},
+    )
+    revisit_id = store.add_capture(
+        capture_key="chat:revisit",
+        chat_id="chat",
+        message_id=24,
+        chat_type="private",
+        chat_title="me",
+        sender_user_id="42",
+        sender_name="User",
+        message_date=None,
+        text="revisit",
+        caption="",
+        content_kind="text",
+        raw_message={"message_id": 24},
+    )
+    store.upsert_archive_item(
+        review_id,
+        {
+            "title": "Weak capture",
+            "core_summary": "Needs human review",
+            "raw_extracted_text": "Needs human review",
+            "source_language": "en",
+            "primary_interest": "other/unknown",
+            "topic": "",
+            "confidence": 0.2,
+            "needs_review": True,
+        },
+    )
+    store.upsert_archive_item(
+        revisit_id,
+        {
+            "title": "Useful project seed",
+            "core_summary": "Return to this later",
+            "raw_extracted_text": "Return to this later",
+            "source_language": "en",
+            "primary_interest": "product",
+            "topic": "archive",
+            "revisit_priority": "high",
+            "revisit_reason": "convert into product task",
+            "insight_seed": "local search workflow",
+            "confidence": 0.8,
+            "needs_review": False,
+        },
+    )
+
+    needs_review = store.review_archive_items(needs_review_only=True)
+    revisit = store.review_archive_items(revisit_only=True)
+
+    assert [row["capture_id"] for row in needs_review] == [review_id]
+    assert [row["capture_id"] for row in revisit] == [revisit_id]
+
+
 def test_init_db_adds_structured_archive_columns_to_existing_db(tmp_path):
     store = ArchiveStore(tmp_path / "state")
     store.path.parent.mkdir(parents=True, exist_ok=True)

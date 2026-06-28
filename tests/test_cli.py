@@ -189,6 +189,88 @@ def test_list_filters_by_interest(tmp_path, monkeypatch, capsys):
     assert "interest=career topic=portfolio" in output
 
 
+def test_search_command_returns_explained_matches(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path)
+    store = ArchiveStore(settings.state_dir)
+    capture_id = add_archive_item(
+        store,
+        message_id=31,
+        title="Local archive retrieval",
+        primary_interest="AI",
+        secondary_interests=["product"],
+        topic="search",
+        tags=["fts", "archive"],
+        raw_text="SQLite FTS makes saved captures searchable.",
+    )
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["search", "SQLite", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["query"] == "SQLite"
+    assert payload["results"][0]["capture_id"] == capture_id
+    assert "extracted_text" in payload["results"][0]["matched_fields"]
+    assert payload["results"][0]["match_explanation"].startswith("Matched")
+
+
+def test_search_command_can_rebuild_generated_index(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path)
+    store = ArchiveStore(settings.state_dir)
+    add_archive_item(
+        store,
+        message_id=32,
+        title="Search index rebuild",
+        primary_interest="AI",
+        secondary_interests=[],
+        topic="search",
+        tags=["fts"],
+    )
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["search", "rebuild", "--rebuild"]) == 0
+    output = capsys.readouterr().out
+
+    assert "search index rebuilt archive_items=1" in output
+    assert "why: Matched" in output
+
+
+def test_review_command_lists_needs_review_and_revisit_queues(tmp_path, monkeypatch, capsys):
+    settings = make_cli_settings(tmp_path)
+    store = ArchiveStore(settings.state_dir)
+    review_id = add_archive_item(
+        store,
+        message_id=33,
+        title="Weak classification",
+        primary_interest="other/unknown",
+        secondary_interests=[],
+        topic="",
+        tags=[],
+        needs_review=True,
+    )
+    revisit_id = add_archive_item(
+        store,
+        message_id=34,
+        title="Useful project seed",
+        primary_interest="product",
+        secondary_interests=[],
+        topic="archive",
+        tags=["idea"],
+        needs_review=False,
+        insight_seed="turn this into a retrieval workflow",
+    )
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    assert main(["review", "--needs-review", "--json"]) == 0
+    needs_review = json.loads(capsys.readouterr().out)
+    assert needs_review["mode"] == "needs-review"
+    assert [item["capture_id"] for item in needs_review["items"]] == [review_id]
+
+    assert main(["review", "--revisit", "--json"]) == 0
+    revisit = json.loads(capsys.readouterr().out)
+    assert revisit["mode"] == "revisit"
+    assert revisit_id in [item["capture_id"] for item in revisit["items"]]
+
+
 def test_interests_and_concepts_inspect_archive_distribution(tmp_path, monkeypatch, capsys):
     settings = make_cli_settings(tmp_path)
     store = ArchiveStore(settings.state_dir)

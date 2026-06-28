@@ -16,9 +16,16 @@ launchd/cron
   -> codex exec with JSON Schema
   -> validated archive_items/extracted_texts SQLite rows
   -> archive_interpretations audit row for each successful interpretation
+  -> generated SQLite FTS5 search index from validated archive rows
   -> if any capture was processed, rebuild semantic graph from validated archive_items SQLite rows
   -> RDF store under .local/graph/semantic-store/
   -> lightweight JSON-LD export under .local/graph/darchivebot.jsonld
+
+daily retrieval
+  -> darchive search
+  -> darchive review
+  -> darchive web on 127.0.0.1
+  -> archive detail, matched fields, related captures, insight notes
 
 manual graph inspection
   -> darchive graph sync
@@ -41,8 +48,10 @@ future Viewpoint Layer
 - `codex_harness`: non-interactive Codex invocation and JSON Schema setup.
 - `processor`: pending capture selection, Codex result validation, fallback extraction, state transitions.
 - `ocr`: optional local OCR fallback when Codex is disabled.
+- `search`: generated SQLite FTS5 index, match explanation, review queues, and detail shaping for CLI/web retrieval.
 - `semantic_graph`: pyoxigraph RDF store sync, stats, and N-Quads export from validated archive rows.
 - `graph`: lightweight JSON-LD portable export from validated archive rows.
+- `web`: loopback-only local archive workbench over SQLite search/review/detail data.
 - `cli`: setup, doctor, polling, processing, listing, and utility commands.
 
 Codex is intentionally not allowed to write SQLite directly. Codex reads a bounded capture packet and attached images, returns structured JSON, then Python validates and writes the database. This keeps database mutation deterministic and makes retry/failure handling explicit.
@@ -61,6 +70,9 @@ Capture Layer
 
 Archive Layer
   -> SQLite source of truth for captures, files, extracted text, archive items, archive interpretations, retry state, and processing runs
+
+Search Layer
+  -> generated SQLite FTS5 index, search explanations, review queues, and loopback-only local web UI
 
 Semantic Graph Layer
   -> generated meaning layer for interests, topics, concepts, claims, questions, and relation candidates
